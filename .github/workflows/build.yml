@@ -32,6 +32,16 @@ jobs:
       - name: Run tests (Release)
         run: build/GrainLockTests_artefacts/Release/GrainLockTests.exe
 
+      - name: Render UI snapshots
+        run: build/GrainLockTests_artefacts/Release/GrainLockTests.exe --snapshot ui-snapshots
+
+      - name: Upload UI snapshots
+        uses: actions/upload-artifact@v7
+        with:
+          name: GrainLock-UI-Snapshots
+          path: ui-snapshots/
+          if-no-files-found: error
+
       # The Release run counts operator new only. The debug CRT reports every heap allocation
       # (including malloc from JUCE's HeapBlock), so the no-allocation check runs again there.
       - name: Build tests (Debug CRT)

@@ -3,6 +3,7 @@
 //
 //   GrainLockTests                 run everything
 //   GrainLockTests --only alloc    run just the allocation check (used for the Debug-CRT build)
+//   GrainLockTests --snapshot DIR  render the editor to PNGs in DIR instead of testing
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
@@ -10,6 +11,8 @@
 #include "PluginProcessor.h"
 #include "Presets.h"
 #include "dsp/Lfo.h"
+#include "ui/GrainLookAndFeel.h"
+#include "ui/MainPanel.h"
 
 #include <algorithm>
 #include <array>
@@ -996,6 +999,89 @@ namespace
     }
 }
 
+namespace
+{
+    using namespace grainlock;
+
+    /** Plays a chord into a preset and renders the real interface (2x) to a PNG, exactly as the
+        editor draws it, including the loop display fed through the audio thread's FIFO. */
+    bool renderSnapshot (const juce::File& file, const char* presetName, std::initializer_list<int> chord)
+    {
+        const double rate = 48000.0;
+        const int block = 1600;   // one display frame per block
+
+        GrainLockProcessor proc;
+        proc.setPlayConfigDetails (2, 2, rate, block);
+        proc.prepareToPlay (rate, block);
+        if (const int index = proc.getPresetIndex (presetName); index >= 0)
+            proc.loadPreset (index);
+
+        ui::GrainLookAndFeel lookAndFeel;
+        ui::MainPanel panel (proc);
+        panel.setLookAndFeel (&lookAndFeel);
+        panel.setSize (ui::Theme::baseWidth, ui::Theme::baseHeight);
+
+        juce::AudioBuffer<float> buffer (2, block);
+        juce::MidiBuffer midi;
+        double phase = 0.0;
+
+        for (int b = 0; b < 60; ++b)
+        {
+            // A buzzy, voice-like source: 110 Hz with twelve harmonics at staggered phases.
+            for (int i = 0; i < block; ++i)
+            {
+                float v = 0.0f;
+                for (int k = 1; k <= 12; ++k)
+                    v += (float) std::sin (phase * k + 0.3 * k * k) / (float) k;
+                phase += juce::MathConstants<double>::twoPi * 110.0 / rate;
+                buffer.setSample (0, i, 0.18f * v);
+                buffer.setSample (1, i, 0.18f * v);
+            }
+
+            midi.clear();
+            if (b == 10)
+                for (int note : chord)
+                {
+                    const juce::uint8 on[3] = { 0x90, (juce::uint8) note, 100 };
+                    midi.addEvent (on, 3, 0);
+                }
+
+            proc.processBlock (buffer, midi);
+
+            if (b >= 10)
+            {
+                ScopeFrame frame;
+                const bool fresh = proc.getScopeFifo().pullLatest (frame);
+                panel.tick (fresh ? &frame : nullptr);
+            }
+        }
+
+        const auto image = panel.createComponentSnapshot (panel.getLocalBounds(), true, 2.0f);
+        file.deleteFile();
+        bool ok = false;
+        {
+            juce::FileOutputStream out (file);
+            juce::PNGImageFormat png;
+            ok = out.openedOk() && image.isValid() && png.writeImageToStream (image, out);
+        }
+        panel.setLookAndFeel (nullptr);
+
+        std::printf ("%s %s (%d x %d)\n", ok ? "wrote" : "FAILED to write", file.getFullPathName().toRawUTF8(),
+                     image.getWidth(), image.getHeight());
+        return ok;
+    }
+
+    int renderSnapshots (const juce::String& directory)
+    {
+        const auto dir = juce::File::getCurrentWorkingDirectory().getChildFile (directory);
+        dir.createDirectory();
+
+        bool ok = renderSnapshot (dir.getChildFile ("grainlock-formant-choir.png"), "Formant Choir", { 57, 60, 64, 67 });
+        ok = renderSnapshot (dir.getChildFile ("grainlock-glitch-drums.png"), "Glitch Drums", { 48, 55 }) && ok;
+        return ok ? 0 : 1;
+    }
+}
+
 int main (int argc, char** argv)
 {
     GRAINLOCK_INSTALL_ALLOC_HOOK();
@@ -1010,6 +1096,8 @@ int main (int argc, char** argv)
             only = argv[++i];
         else if (arg == "--alloc-minutes" && i + 1 < argc)
             allocMinutes = juce::String (argv[++i]).getDoubleValue();
+        else if (arg == "--snapshot" && i + 1 < argc)
+            return renderSnapshots (argv[++i]);
     }
 
     auto wants = [&only] (const char* name) { return only.isEmpty() || only == name; };
