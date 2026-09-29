@@ -133,8 +133,17 @@ namespace grainlock::ui
 
         g.setColour (Theme::accentAlpha (0.45f));
         g.drawVerticalLine (juce::roundToInt (region.getX()), region.getY(), region.getBottom());
-        g.setFont (Theme::font (10.5f, true, 0.15f));
-        g.drawText ("SEAM", region.withHeight (14.0f).translated (0.0f, 2.0f), juce::Justification::centred, false);
+
+        // Label inside the region when it fits, otherwise just outside its left edge.
+        const auto font = Theme::font (10.5f, true, 0.15f);
+        const float labelWidth = juce::GlyphArrangement::getStringWidth (font, "SEAM") + 8.0f;
+        const auto labelRow = region.withHeight (14.0f).translated (0.0f, 2.0f);
+        g.setFont (font);
+        if (region.getWidth() >= labelWidth)
+            g.drawText ("SEAM", labelRow, juce::Justification::centred, false);
+        else
+            g.drawText ("SEAM", labelRow.withWidth (labelWidth).translated (-labelWidth - 2.0f, 0.0f),
+                        juce::Justification::centredRight, false);
     }
 
     void GrainDisplay::paintWave (juce::Graphics& g, juce::Rectangle<float> area) const
@@ -245,15 +254,28 @@ namespace grainlock::ui
                                                      whiteWidth, keys.getHeight()).reduced (0.5f, 0.0f);
             g.setColour (isHeld (note) ? Theme::accent : Theme::panelRaised);
             g.fillRect (key);
-
-            if (note % 12 == 0 && showLabels)
-            {
-                g.setColour (isHeld (note) ? Theme::onAccent : Theme::textFaint);
-                g.setFont (Theme::font (9.0f));
-                g.drawText (formatNoteName (note), key.withTrimmedLeft (1.5f).removeFromBottom (9.0f).withWidth (whiteWidth * 2.0f),
-                            juce::Justification::centredLeft, false);
-            }
             ++whiteIndex;
+        }
+
+        // Octave names in their own pass, so the next key's fill cannot paint over a long name (C-2).
+        if (showLabels)
+        {
+            g.setFont (Theme::font (9.0f));
+            whiteIndex = 0;
+            for (int note = 0; note < 128; ++note)
+            {
+                if (isBlack (note))
+                    continue;
+
+                if (note % 12 == 0)
+                {
+                    const auto label = juce::Rectangle<float> (keys.getX() + whiteWidth * (float) whiteIndex + 2.0f,
+                                                               keys.getBottom() - 9.0f, whiteWidth * 3.0f, 9.0f);
+                    g.setColour (isHeld (note) ? Theme::onAccent : Theme::textFaint);
+                    g.drawText (formatNoteName (note), label, juce::Justification::centredLeft, false);
+                }
+                ++whiteIndex;
+            }
         }
 
         whiteIndex = 0;
