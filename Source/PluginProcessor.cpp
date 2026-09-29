@@ -1,31 +1,30 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
+using namespace grainlock;
+
 GrainLockProcessor::GrainLockProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "GrainLockState", createParameterLayout())
+      apvts (*this, nullptr, "GrainLockState", createParameterLayout()),
+      params (apvts)
 {
-    outGainParam = apvts.getRawParameterValue ("outGain");
 }
 
-juce::AudioProcessorValueTreeState::ParameterLayout GrainLockProcessor::createParameterLayout()
+void GrainLockProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    juce::AudioProcessorValueTreeState::ParameterLayout layout;
-    layout.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "outGain", 1 }, "Output Gain",
-                                                             juce::NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f,
-                                                             juce::AudioParameterFloatAttributes().withLabel ("dB")));
-    return layout;
-}
-
-void GrainLockProcessor::prepareToPlay (double sampleRate, int)
-{
-    outGain.reset (sampleRate, 0.02);
-    outGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (outGainParam->load()));
+    engine.prepare (sampleRate, samplesPerBlock);
 }
 
 void GrainLockProcessor::releaseResources() {}
+
+void GrainLockProcessor::reset()
+{
+    engine.reset();
+}
 
 bool GrainLockProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
@@ -36,29 +35,91 @@ bool GrainLockProcessor::isBusesLayoutSupported (const BusesLayout& layouts) con
     return in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo();
 }
 
-void GrainLockProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+EngineParams GrainLockProcessor::readParameters() const noexcept
+{
+    // A host can hand over a NaN or infinite value; anything non-finite falls back to the default.
+    const EngineParams d {};
+    auto value  = [] (const std::atomic<float>* p, float fallback) { const float v = p->load(); return std::isfinite (v) ? v : fallback; };
+    auto asInt  = [&value] (const std::atomic<float>* p, int fallback) { return (int) std::lround (value (p, (float) fallback)); };
+    auto asBool = [&value] (const std::atomic<float>* p, bool fallback) { return value (p, fallback ? 1.0f : 0.0f) >= 0.5f; };
+
+    EngineParams p;
+    p.grainCycles      = juce::jlimit (minCycles, maxCycles, asInt (params.grainCycles, d.grainCycles));
+    p.smoothPercent    = value (params.smooth, d.smoothPercent);
+    p.offsetMs         = value (params.offset, d.offsetMs);
+    p.captureMode      = asInt (params.captureMode, (int) d.captureMode) == (int) CaptureMode::hold ? CaptureMode::hold : CaptureMode::live;
+    p.refreshMs        = value (params.refresh, d.refreshMs);
+    p.pitchLock        = asBool (params.pitchLock, d.pitchLock);
+
+    p.formantSemitones = value (params.formant, d.formantSemitones);
+    p.tuneSemitones    = asInt (params.tune, d.tuneSemitones);
+    p.fineCents        = value (params.fine, d.fineCents);
+    p.glideMs          = value (params.glide, d.glideMs);
+    p.mono             = asBool (params.mono, d.mono);
+    p.velSensPercent   = value (params.velSens, d.velSensPercent);
+
+    p.attackMs         = value (params.attack, d.attackMs);
+    p.decayMs          = value (params.decay, d.decayMs);
+    p.sustainPercent   = value (params.sustain, d.sustainPercent);
+    p.releaseMs        = value (params.release, d.releaseMs);
+
+    p.lfoRateHz        = value (params.lfoRate, d.lfoRateHz);
+    p.lfoSync          = asInt (params.lfoSync, d.lfoSync);
+    p.lfoShape         = (LfoShape) juce::jlimit (0, 3, asInt (params.lfoShape, (int) d.lfoShape));
+    p.lfoDepthPercent  = value (params.lfoDepth, d.lfoDepthPercent);
+    p.lfoTarget        = (LfoTarget) juce::jlimit (0, 2, asInt (params.lfoTarget, (int) d.lfoTarget));
+
+    p.mixPercent       = value (params.mix, d.mixPercent);
+    p.dryWhenIdle      = asBool (params.dryWhenIdle, d.dryWhenIdle);
+    p.outGainDb        = value (params.outGain, d.outGainDb);
+    return p;
+}
+
+HostTiming GrainLockProcessor::readHostTiming() const noexcept
+{
+    HostTiming timing;
+    if (auto* host = getPlayHead())
+    {
+        if (const auto position = host->getPosition())
+        {
+            // Ignore tempos and positions no real session has; the LFO keeps its own clock instead.
+            if (const auto bpm = position->getBpm())
+                if (std::isfinite (*bpm) && *bpm > 0.0 && *bpm <= 1000.0)
+                    timing.bpm = *bpm;
+
+            if (const auto ppq = position->getPpqPosition())
+            {
+                if (std::isfinite (*ppq) && std::abs (*ppq) < 1.0e12)
+                {
+                    timing.hasPpq = true;
+                    timing.ppq = *ppq;
+                }
+            }
+
+            timing.playing = position->getIsPlaying();
+        }
+    }
+    return timing;
+}
+
+void GrainLockProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
 
-    const int numSamples = buffer.getNumSamples();
-    const int numIns = getTotalNumInputChannels();
+    engine.process (buffer.getArrayOfWritePointers(), buffer.getNumChannels(), getTotalNumInputChannels(),
+                    buffer.getNumSamples(), midi, readParameters(), readHostTiming());
+}
 
-    // Mono in, stereo out: the right output starts as whatever the host left there, so copy the left.
-    if (numIns == 1 && buffer.getNumChannels() > 1)
-        buffer.copyFrom (1, 0, buffer, 0, 0, numSamples);
+void GrainLockProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
 
-    outGain.setTargetValue (juce::Decibels::decibelsToGain (outGainParam->load()));
+    // Bypassed audio is the input, on both sides even for a mono input.
+    if (getTotalNumInputChannels() == 1 && buffer.getNumChannels() > 1)
+        buffer.copyFrom (1, 0, buffer, 0, 0, buffer.getNumSamples());
 
-    auto* left = buffer.getWritePointer (0);
-    auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
-
-    for (int i = 0; i < numSamples; ++i)
-    {
-        const float g = outGain.getNextValue();
-        left[i] *= g;
-        if (right != nullptr)
-            right[i] *= g;
-    }
+    engine.processBypassed (buffer.getArrayOfReadPointers(), buffer.getNumChannels(), getTotalNumInputChannels(),
+                            buffer.getNumSamples());
 }
 
 juce::AudioProcessorEditor* GrainLockProcessor::createEditor()

@@ -26,6 +26,9 @@ FetchContent_MakeAvailable(JUCE)
 
 # Sources shared by the plugin and the test runner, so the tests exercise the shipped code.
 set(GRAINLOCK_SOURCES
+    Source/Parameters.cpp
+    Source/dsp/GrainVoice.cpp
+    Source/dsp/GrainEngine.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
 

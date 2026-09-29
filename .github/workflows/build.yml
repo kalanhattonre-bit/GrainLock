@@ -10,8 +10,9 @@ on:
 permissions:
   contents: write
 
+# One run per commit: every step of the history gets its own green (or red) result.
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -30,6 +31,14 @@ jobs:
 
       - name: Run tests (Release)
         run: build/GrainLockTests_artefacts/Release/GrainLockTests.exe
+
+      # The Release run counts operator new only. The debug CRT reports every heap allocation
+      # (including malloc from JUCE's HeapBlock), so the no-allocation check runs again there.
+      - name: Build tests (Debug CRT)
+        run: cmake --build build --config Debug --target GrainLockTests --parallel
+
+      - name: Allocation check (Debug CRT)
+        run: build/GrainLockTests_artefacts/Debug/GrainLockTests.exe --only alloc
 
       # bash, not pwsh: pluginval.exe is a GUI-subsystem program, and PowerShell's call operator
       # returns without waiting for those, so it never sees the exit code.
