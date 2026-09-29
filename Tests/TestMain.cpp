@@ -8,6 +8,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "PluginProcessor.h"
+#include "Presets.h"
 #include "dsp/Lfo.h"
 
 #include <algorithm>
@@ -913,6 +914,88 @@ namespace
     }
 }
 
+namespace
+{
+    using namespace grainlock;
+
+    void testFactoryPresets()
+    {
+        section ("Presets: each one sets exactly its values (defaults elsewhere) and plays safely");
+
+        const auto& presets = factoryPresets();
+        const char* expected[] = { "Init", "Robot Voice", "Stutter Gate", "Drone Pad", "Glitch Drums", "Formant Choir" };
+        bool namesMatch = presets.size() == std::size (expected);
+        for (size_t i = 0; namesMatch && i < presets.size(); ++i)
+            namesMatch = juce::String (presets[i].name) == expected[i];
+        check (namesMatch, fmt ("%d factory presets, in menu order: Init, Robot Voice, Stutter Gate, Drone Pad, Glitch Drums, Formant Choir",
+                                (int) presets.size()));
+
+        for (int index = 0; index < (int) presets.size(); ++index)
+        {
+            const auto& preset = presets[(size_t) index];
+            Harness h (48000.0, 256);
+
+            // Scramble everything first, so a value the preset forgets to reset would show up.
+            juce::Random scramble (100 + index);
+            for (const char* id : ParamID::all)
+            {
+                auto* p = h.proc.apvts.getParameter (id);
+                p->setValueNotifyingHost (p->convertTo0to1 (p->convertFrom0to1 (scramble.nextFloat())));
+            }
+
+            h.proc.loadPreset (index);
+
+            int wrong = 0;
+            for (const char* id : ParamID::all)
+            {
+                auto* p = h.proc.apvts.getParameter (id);
+                float want = p->convertFrom0to1 (p->getDefaultValue());
+                for (const auto& v : preset.values)
+                    if (juce::String (v.id) == id)
+                        want = p->convertFrom0to1 (p->convertTo0to1 (v.value));
+
+                const float got = h.proc.apvts.getRawParameterValue (id)->load();
+                if (std::abs (got - want) > 1.0e-3f * std::max (1.0f, std::abs (want)))
+                {
+                    ++wrong;
+                    std::printf ("    %s: %s is %.4f, expected %.4f\n", preset.name, id, got, want);
+                }
+            }
+            check (wrong == 0 && h.proc.getCurrentPresetName() == preset.name,
+                   fmt ("%s: all %d parameters as specified, name shown as \"%s\"", preset.name,
+                        (int) std::size (ParamID::all), h.proc.getCurrentPresetName().toRawUTF8()));
+
+            // Play it: a chord, then a run of short notes, over noise.
+            std::vector<MidiEvent> events;
+            for (int k = 0; k < 4; ++k)
+                events.push_back (noteOnAt (24000, 48 + 4 * k, 100));
+            for (int k = 0; k < 4; ++k)
+                events.push_back (noteOffAt (72000, 48 + 4 * k));
+            for (int k = 0; k < 16; ++k)
+            {
+                events.push_back (noteOnAt (84000 + k * 6000, 55 + (k * 5) % 24, 90));
+                events.push_back (noteOffAt (84000 + k * 6000 + 3000, 55 + (k * 5) % 24));
+            }
+            std::sort (events.begin(), events.end(), [] (const MidiEvent& a, const MidiEvent& b) { return a.time < b.time; });
+
+            h.proc.resetLimiterStats();
+            juce::Random rng (40 + index);
+            std::vector<float> out;
+            h.run (240000, events, 0.4f, &out, nullptr, rng);
+
+            float peak = 0.0f;
+            bool finite = true;
+            for (float v : out)
+            {
+                finite = finite && std::isfinite (v);
+                peak = std::max (peak, std::abs (v));
+            }
+            check (finite && h.proc.getLimiterStats().nonFiniteInputs == 0 && peak <= 1.0f && peak > 0.01f,
+                   fmt ("%s: plays cleanly (peak %.3f, %d non-finite)", preset.name, peak, h.proc.getLimiterStats().nonFiniteInputs));
+        }
+    }
+}
+
 int main (int argc, char** argv)
 {
     GRAINLOCK_INSTALL_ALLOC_HOOK();
@@ -936,6 +1019,7 @@ int main (int argc, char** argv)
     if (wants ("dry"))      testDryWhenIdle();
     if (wants ("state"))    testStateRoundTrip();
     if (wants ("alloc"))    testNoAllocations (allocMinutes);
+    if (wants ("presets"))  testFactoryPresets();
     if (wants ("extra"))
     {
         testRatesBlocksAndLayouts();
