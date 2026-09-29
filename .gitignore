@@ -1,0 +1,11 @@
+build/
+build-*/
+out/
+.vs/
+.vscode/
+.idea/
+*.user
+CMakeUserPresets.json
+pluginval-logs/
+pluginval/
+*.zip

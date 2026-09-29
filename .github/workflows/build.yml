@@ -1,0 +1,92 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows x64 (VST3, tests, pluginval)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DGRAINLOCK_BUILD_TESTS=ON
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Run tests (Release)
+        run: build/GrainLockTests_artefacts/Release/GrainLockTests.exe
+
+      - name: Validate with pluginval
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_Windows.zip -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pluginval -Force
+          $exe = Get-ChildItem pluginval -Recurse -Filter pluginval.exe | Select-Object -First 1
+          & $exe.FullName --strictness-level 10 --validate-in-process --timeout-ms 600000 --output-dir pluginval-logs --validate "build/GrainLock_artefacts/Release/VST3/GrainLock.vst3"
+          if ($LASTEXITCODE -ne 0) { throw "pluginval reported errors (exit code $LASTEXITCODE)" }
+
+      - name: Upload pluginval logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pluginval-logs
+          path: pluginval-logs/
+          if-no-files-found: ignore
+
+      - name: Upload VST3
+        uses: actions/upload-artifact@v7
+        with:
+          name: GrainLock-VST3-Windows
+          path: build/GrainLock_artefacts/Release/VST3/
+          if-no-files-found: error
+
+      - name: Zip VST3 for release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path build/GrainLock_artefacts/Release/VST3/GrainLock.vst3 -DestinationPath "GrainLock-${{ github.ref_name }}-Windows-x64.zip"
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" "GrainLock-${{ github.ref_name }}-Windows-x64.zip" --title "GrainLock ${{ github.ref_name }}" --generate-notes
+
+  linux-tests:
+    name: Linux (tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install JUCE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libfontconfig1-dev libfreetype-dev ladspa-sdk \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGRAINLOCK_BUILD_PLUGIN=OFF -DGRAINLOCK_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: build/GrainLockTests_artefacts/Release/GrainLockTests
