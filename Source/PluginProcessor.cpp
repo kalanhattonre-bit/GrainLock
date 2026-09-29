@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Presets.h"
 
 #include <cmath>
 
@@ -120,6 +121,38 @@ void GrainLockProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer,
 
     engine.processBypassed (buffer.getArrayOfReadPointers(), buffer.getNumChannels(), getTotalNumInputChannels(),
                             buffer.getNumSamples());
+}
+
+int GrainLockProcessor::getNumPresets() const
+{
+    return (int) factoryPresets().size();
+}
+
+juce::String GrainLockProcessor::getPresetName (int index) const
+{
+    const auto& presets = factoryPresets();
+    return juce::isPositiveAndBelow (index, (int) presets.size()) ? juce::String (presets[(size_t) index].name) : juce::String();
+}
+
+int GrainLockProcessor::getPresetIndex (const juce::String& name) const
+{
+    const auto& presets = factoryPresets();
+    for (size_t i = 0; i < presets.size(); ++i)
+        if (name == presets[i].name)
+            return (int) i;
+    return -1;
+}
+
+void GrainLockProcessor::loadPreset (int index)
+{
+    const auto& presets = factoryPresets();
+    if (juce::isPositiveAndBelow (index, (int) presets.size()))
+        applyPreset (apvts, presets[(size_t) index]);
+}
+
+juce::String GrainLockProcessor::getCurrentPresetName() const
+{
+    return apvts.state.getProperty ("presetName", "Init").toString();
 }
 
 juce::AudioProcessorEditor* GrainLockProcessor::createEditor()

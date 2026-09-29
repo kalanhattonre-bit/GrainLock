@@ -47,6 +47,12 @@ public:
     const grainlock::LimiterStats& getLimiterStats() const noexcept { return engine.getLimiterStats(); }
     void resetLimiterStats() noexcept { engine.resetLimiterStats(); }
 
+    // Factory presets (message thread).
+    int getNumPresets() const;
+    juce::String getPresetName (int index) const;
+    int getPresetIndex (const juce::String& name) const;
+    void loadPreset (int index);
+    juce::String getCurrentPresetName() const;
 
     juce::AudioProcessorValueTreeState apvts;
 
