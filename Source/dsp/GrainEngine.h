@@ -29,11 +29,16 @@ namespace grainlock
         float sustainPercent = 100.0f;
         float releaseMs = 150.0f;
 
-        float lfoRateHz = 1.0f;
-        int lfoSync = 0;
-        LfoShape lfoShape = LfoShape::sine;
-        float lfoDepthPercent = 0.0f;
-        LfoTarget lfoTarget = LfoTarget::pitch;
+        /** One of the three LFOs (index = LfoTarget). */
+        struct LfoParams
+        {
+            bool on = false;
+            float rateHz = 1.0f;
+            int sync = 0;
+            LfoShape shape = LfoShape::sine;
+            float depthPercent = 50.0f;
+        };
+        std::array<LfoParams, numLfos> lfos {};
 
         float mixPercent = 100.0f;
         bool dryWhenIdle = true;
@@ -96,21 +101,23 @@ namespace grainlock
 
         InputRing ring;
         std::array<GrainVoice, numVoiceSlots> voices;
-        Lfo lfo;
+        std::array<Lfo, numLfos> lfos;
         SoftLimiter limiter;
         ScopeFifo scopeFifo;
 
         // Smoothed continuous controls.
         juce::SmoothedValue<float> tuneSemis, bendSemis, formantSemis, smoothFraction;
-        juce::SmoothedValue<float> mix, lfoDepth, lfoRate, sustain;
+        juce::SmoothedValue<float> mix, sustain;
+        std::array<juce::SmoothedValue<float>, numLfos> lfoDepth;   // 0 when that LFO is off, so switching fades
+        std::array<juce::SmoothedValue<float>, numLfos> lfoRate;
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outGain { 1.0f };
 
         // Values fixed for the current block.
         EngineParams block;
         int offsetSamples = 0;
         double refreshSamples = 1200.0;
-        double lfoIncrement = 0.0;
-        bool lfoSynced = false;
+        std::array<double, numLfos> lfoIncrement {};
+        std::array<bool, numLfos> lfoSynced {};
         float captureRatioMax = 1.0f;
         int captureCyclesMax = 2;
         bool captureBothLayouts = false;
@@ -121,9 +128,9 @@ namespace grainlock
         bool firstBlock = true;
         bool wasBypassed = false;
 
-        float lfoSmoothed = 0.0f;
+        std::array<float, numLfos> lfoSmoothed {};
+        std::array<float, numLfos> lfoLastScaled {};
         float lfoSmoothCoeff = 0.01f;
-        float lfoLastScaled = 0.0f;
         float activity = 0.0f;
         float activityUp = 0.01f, activityDown = 0.003f;
         float limiterBlend = 0.0f;      // 0 = limiter out of the path (pure dry at rest), 1 = fully in

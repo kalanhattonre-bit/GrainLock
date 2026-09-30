@@ -19,13 +19,18 @@ namespace grainlock
         formantSemis.reset (sampleRate, 0.03);
         smoothFraction.reset (sampleRate, 0.03);
         mix.reset (sampleRate, 0.02);
-        lfoDepth.reset (sampleRate, 0.02);
-        lfoRate.reset (sampleRate, 0.05);
+        for (int i = 0; i < numLfos; ++i)
+        {
+            lfoDepth[(size_t) i].reset (sampleRate, 0.02);
+            lfoRate[(size_t) i].reset (sampleRate, 0.05);
+        }
         sustain.reset (sampleRate, 0.02);
         outGain.reset (sampleRate, 0.02);
 
         limiter.prepare (sampleRate);
-        lfo.reset (0x6a1f5eedull);
+        // Different seeds, so S&H on two LFOs never steps in lockstep.
+        for (int i = 0; i < numLfos; ++i)
+            lfos[(size_t) i].reset (0x6a1f5eedull + 0x9e3779b9ull * (juce::uint64) (i + 1));
 
         lfoSmoothCoeff = (float) (1.0 - std::exp (-1.0 / (0.002 * sampleRate)));
         activityUp = (float) (1.0 / (0.002 * sampleRate));
@@ -51,8 +56,8 @@ namespace grainlock
         bendSemis.setCurrentAndTargetValue (0.0f);
         activity = 0.0f;
         limiterBlend = 0.0f;
-        lfoSmoothed = 0.0f;
-        lfoLastScaled = 0.0f;
+        lfoSmoothed.fill (0.0f);
+        lfoLastScaled.fill (0.0f);
         scopeCountdown = 0;
         lastStartedVoice = -1;
     }
@@ -74,8 +79,12 @@ namespace grainlock
             formantSemis.setCurrentAndTargetValue (params.formantSemitones);
             smoothFraction.setCurrentAndTargetValue (params.smoothPercent / 100.0f);
             mix.setCurrentAndTargetValue (params.mixPercent / 100.0f);
-            lfoDepth.setCurrentAndTargetValue (params.lfoDepthPercent / 100.0f);
-            lfoRate.setCurrentAndTargetValue (params.lfoRateHz);
+            for (int i = 0; i < numLfos; ++i)
+            {
+                const auto& l = params.lfos[(size_t) i];
+                lfoDepth[(size_t) i].setCurrentAndTargetValue (l.on ? l.depthPercent / 100.0f : 0.0f);
+                lfoRate[(size_t) i].setCurrentAndTargetValue (l.rateHz);
+            }
             sustain.setCurrentAndTargetValue (params.sustainPercent / 100.0f);
             outGain.setCurrentAndTargetValue (gain);
             firstBlock = false;
@@ -86,8 +95,12 @@ namespace grainlock
             formantSemis.setTargetValue (params.formantSemitones);
             smoothFraction.setTargetValue (params.smoothPercent / 100.0f);
             mix.setTargetValue (params.mixPercent / 100.0f);
-            lfoDepth.setTargetValue (params.lfoDepthPercent / 100.0f);
-            lfoRate.setTargetValue (params.lfoRateHz);
+            for (int i = 0; i < numLfos; ++i)
+            {
+                const auto& l = params.lfos[(size_t) i];
+                lfoDepth[(size_t) i].setTargetValue (l.on ? l.depthPercent / 100.0f : 0.0f);
+                lfoRate[(size_t) i].setTargetValue (l.rateHz);
+            }
             sustain.setTargetValue (params.sustainPercent / 100.0f);
             outGain.setTargetValue (gain);
         }
@@ -101,18 +114,21 @@ namespace grainlock
             voice.setEnvelopeTimes (params.attackMs, params.decayMs, params.releaseMs);
 
         // LFO: free-running in Hz, or locked to the host's tempo and song position.
-        const double beats = lfoSyncBeats (params.lfoSync);
-        lfoSynced = beats > 0.0;
-        if (lfoSynced)
+        for (int i = 0; i < numLfos; ++i)
         {
+            const double beats = lfoSyncBeats (params.lfos[(size_t) i].sync);
+            lfoSynced[(size_t) i] = beats > 0.0;
+            if (! lfoSynced[(size_t) i])
+                continue;
+
             const double bpm = timing.bpm > 0.0 ? timing.bpm : 120.0;
-            lfoIncrement = bpm / 60.0 / beats / sampleRate;
+            lfoIncrement[(size_t) i] = bpm / 60.0 / beats / sampleRate;
 
             if (timing.playing && timing.hasPpq)
             {
                 const double cycles = timing.ppq / beats;
                 const double whole = std::floor (cycles);
-                lfo.syncTo (cycles - whole, (juce::int64) whole);
+                lfos[(size_t) i].syncTo (cycles - whole, (juce::int64) whole);
             }
         }
 
@@ -120,14 +136,18 @@ namespace grainlock
         // wherever the smoothers still are. Live replaces its grain every Refresh, so a small margin
         // will do; Hold keeps it for the whole note, so it gets room to turn Formant and Grain up.
         const bool hold = params.captureMode == CaptureMode::hold;
-        const float depth = juce::jmax (lfoDepth.getCurrentValue(), params.lfoDepthPercent / 100.0f);
+        auto reachOf = [this, &params] (LfoTarget target)
+        {
+            const auto i = (size_t) target;
+            const float wanted = params.lfos[i].on ? params.lfos[i].depthPercent / 100.0f : 0.0f;
+            return juce::jmax (lfoDepth[i].getCurrentValue(), wanted);   // counts a fade still in progress
+        };
+
         const float formantNow = juce::jmax (formantSemis.getCurrentValue(), params.formantSemitones);
-        const float formantReach = formantNow + (hold ? 6.0f : 1.0f)
-                                 + (params.lfoTarget == LfoTarget::formant ? lfoFormantRangeSemitones * depth : 0.0f);
+        const float formantReach = formantNow + (hold ? 6.0f : 1.0f) + lfoFormantRangeSemitones * reachOf (LfoTarget::formant);
         captureRatioMax = juce::jlimit (0.25f, 4.0f, std::exp2 (formantReach / 12.0f));
 
-        const int cyclesReach = params.grainCycles + (params.lfoTarget == LfoTarget::grainCycles
-                                                          ? (int) std::ceil (lfoCyclesRange * depth) : 0);
+        const int cyclesReach = params.grainCycles + (int) std::ceil (lfoCyclesRange * reachOf (LfoTarget::grainCycles));
         captureCyclesMax = juce::jlimit (minCycles, maxCycles, hold ? juce::jmax (cyclesReach, 2 * params.grainCycles)
                                                                     : cyclesReach);
         captureBothLayouts = hold;
@@ -138,20 +158,20 @@ namespace grainlock
         VoiceContext ctx;
         ctx.sampleRate = sampleRate;
 
-        const double increment = lfoSynced ? lfoIncrement : (double) lfoRate.getNextValue() / sampleRate;
-        const float scaled = lfo.next (increment, block.lfoShape) * lfoDepth.getNextValue();
-        lfoLastScaled = scaled;
-        lfoSmoothed += lfoSmoothCoeff * (scaled - lfoSmoothed);   // ~2 ms, takes the click off square and S&H
-        if (! std::isfinite (lfoSmoothed))
-            lfoSmoothed = 0.0f;
-
-        float lfoPitch = 0.0f, lfoFormant = 0.0f, lfoCycles = 0.0f;
-        switch (block.lfoTarget)
+        // All three LFOs run every sample; an LFO that is off just has its depth faded to zero.
+        for (size_t i = 0; i < (size_t) numLfos; ++i)
         {
-            case LfoTarget::pitch:       lfoPitch = lfoSmoothed * lfoPitchRangeSemitones; break;
-            case LfoTarget::formant:     lfoFormant = lfoSmoothed * lfoFormantRangeSemitones; break;
-            case LfoTarget::grainCycles: lfoCycles = scaled * lfoCyclesRange; break;   // steps crossfade in the voice
+            const double increment = lfoSynced[i] ? lfoIncrement[i] : (double) lfoRate[i].getNextValue() / sampleRate;
+            const float scaled = lfos[i].next (increment, block.lfos[i].shape) * lfoDepth[i].getNextValue();
+            lfoLastScaled[i] = scaled;
+            lfoSmoothed[i] += lfoSmoothCoeff * (scaled - lfoSmoothed[i]);   // ~2 ms, takes the click off square and S&H
+            if (! std::isfinite (lfoSmoothed[i]))
+                lfoSmoothed[i] = 0.0f;
         }
+
+        const float lfoPitch = lfoSmoothed[(size_t) LfoTarget::pitch] * lfoPitchRangeSemitones;
+        const float lfoFormant = lfoSmoothed[(size_t) LfoTarget::formant] * lfoFormantRangeSemitones;
+        const float lfoCycles = lfoLastScaled[(size_t) LfoTarget::grainCycles] * lfoCyclesRange;   // steps crossfade in the voice
 
         ctx.globalSemitones = tuneSemis.getNextValue() + bendSemis.getNextValue() + lfoPitch;
         ctx.formantRatio = juce::jlimit (0.25f, 4.0f, std::exp2 ((formantSemis.getNextValue() + lfoFormant) / 12.0f));
@@ -521,8 +541,11 @@ namespace grainlock
         }
 
         frame.seamFraction = ctx.smooth;
-        frame.lfoValue = lfoLastScaled;
-        frame.lfoTarget = (int) block.lfoTarget;
+        for (size_t i = 0; i < (size_t) numLfos; ++i)
+        {
+            frame.lfoValues[i] = lfoLastScaled[i];
+            frame.lfoActive[i] = block.lfos[i].on && block.lfos[i].depthPercent > 0.0f;
+        }
         frame.live = ctx.live;
 
         scopeFifo.push (frame);

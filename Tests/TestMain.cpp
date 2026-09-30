@@ -482,7 +482,7 @@ namespace
             h.set (ParamID::release, 30.0f);
         });
 
-        runStaccato ("worst case (+24 dB, 16 cycles, lock off, formant +12, S&H on cycles)", 0.0f, [] (Harness& h)
+        runStaccato ("worst case (+24 dB, 16 cycles, lock off, formant +12, all three LFOs at 100%)", 0.0f, [] (Harness& h)
         {
             h.set (ParamID::attack, 0.0f);
             h.set (ParamID::release, 30.0f);
@@ -491,10 +491,20 @@ namespace
             h.set (ParamID::pitchLock, 0.0f);
             h.set (ParamID::formant, 12.0f);
             h.set (ParamID::smooth, 0.0f);
-            h.set (ParamID::lfoShape, (float) (int) LfoShape::sampleHold);
-            h.set (ParamID::lfoTarget, (float) (int) LfoTarget::grainCycles);
-            h.set (ParamID::lfoDepth, 100.0f);
-            h.set (ParamID::lfoRate, 12.0f);
+            // All three LFOs at full depth at once.
+            const struct { int lfo; LfoShape shape; float rate; } lfos[] = {
+                { (int) LfoTarget::pitch, LfoShape::square, 7.0f },
+                { (int) LfoTarget::formant, LfoShape::triangle, 3.0f },
+                { (int) LfoTarget::grainCycles, LfoShape::sampleHold, 12.0f },
+            };
+            for (const auto& l : lfos)
+            {
+                const auto& ids = ParamID::lfo[l.lfo];
+                h.set (ids.on, 1.0f);
+                h.set (ids.shape, (float) (int) l.shape);
+                h.set (ids.rate, l.rate);
+                h.set (ids.depth, 100.0f);
+            }
         });
 
         runStaccato ("Hold mode, mono with glide", 6.0f, [] (Harness& h)
@@ -671,11 +681,14 @@ namespace
                 h.set (ParamID::attack, rng.nextFloat() * 200.0f);
                 h.set (ParamID::sustain, rng.nextFloat() * 100.0f);
                 h.set (ParamID::release, 1.0f + rng.nextFloat() * 800.0f);
-                h.set (ParamID::lfoRate, 0.1f + rng.nextFloat() * 20.0f);
-                h.set (ParamID::lfoSync, (float) rng.nextInt (13));
-                h.set (ParamID::lfoShape, (float) rng.nextInt (4));
-                h.set (ParamID::lfoDepth, rng.nextFloat() * 100.0f);
-                h.set (ParamID::lfoTarget, (float) rng.nextInt (3));
+                for (const auto& ids : ParamID::lfo)
+                {
+                    h.set (ids.on, (float) rng.nextInt (2));
+                    h.set (ids.rate, 0.1f + rng.nextFloat() * 20.0f);
+                    h.set (ids.sync, (float) rng.nextInt (13));
+                    h.set (ids.shape, (float) rng.nextInt (4));
+                    h.set (ids.depth, rng.nextFloat() * 100.0f);
+                }
                 h.set (ParamID::mix, rng.nextFloat() * 100.0f);
                 h.set (ParamID::dryWhenIdle, (float) rng.nextInt (2));
                 h.set (ParamID::outGain, rng.nextFloat() * 24.0f - 12.0f);
@@ -875,6 +888,113 @@ namespace
         check (changes >= 98 && changes <= 100, fmt ("%d steps across 99 division boundaries", changes));
     }
 
+    void testThreeLfosTogether()
+    {
+        section ("Extra: pitch, formant and grain LFOs run at the same time");
+
+        // Hold A4. Pitch LFO: square at 0.5 Hz, full depth, so the note sits at +100 cents for a second,
+        // then -100 cents. Formant and grain LFOs run at full depth on top; with Pitch Lock on neither
+        // may move the pitch.
+        Harness h (48000.0, 512);
+        h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+        const struct { int lfo; LfoShape shape; float rate; } lfos[] = {
+            { (int) LfoTarget::pitch, LfoShape::square, 0.5f },
+            { (int) LfoTarget::formant, LfoShape::sine, 0.7f },
+            { (int) LfoTarget::grainCycles, LfoShape::triangle, 0.45f },
+        };
+        for (const auto& l : lfos)
+        {
+            const auto& ids = ParamID::lfo[l.lfo];
+            h.set (ids.on, 1.0f);
+            h.set (ids.shape, (float) (int) l.shape);
+            h.set (ids.rate, l.rate);
+            h.set (ids.depth, 100.0f);
+        }
+
+        const auto out = holdNoteOverNoise (h, 69, (juce::int64) (6.0 * h.rate));
+
+        const double up = 440.0 * std::pow (2.0, 1.0 / 12.0), down = 440.0 * std::pow (2.0, -1.0 / 12.0);
+        int atUp = 0, atDown = 0, windows = 0;
+        const size_t windowLength = 16384 + 962 + 2;
+        for (size_t start = 0; start + windowLength <= out.size(); start += 4800)
+        {
+            const std::vector<float> window (out.begin() + (std::ptrdiff_t) start,
+                                             out.begin() + (std::ptrdiff_t) (start + windowLength));
+            const double f = autocorrFundamentalHz (window, h.rate, 50.0, 2000.0);
+            ++windows;
+            if (std::abs (centsBetween (f, up)) <= 6.0)   ++atUp;
+            if (std::abs (centsBetween (f, down)) <= 6.0) ++atDown;
+        }
+
+        ScopeFrame frame;
+        const bool gotFrame = h.proc.getScopeFifo().pullLatest (frame);
+
+        check (atUp >= 5 && atDown >= 5,
+               fmt ("pitch LFO square: %d of %d windows at +100 cents, %d at -100 cents (formant and grain LFOs running)",
+                    atUp, windows, atDown));
+        check (gotFrame && frame.lfoActive[0] && frame.lfoActive[1] && frame.lfoActive[2],
+               "the display is told all three LFOs are on");
+    }
+
+    void testLegacyLfoMigration()
+    {
+        section ("Extra: a v0.1 session (one shared LFO) loads onto the matching new LFO");
+
+        auto legacyState = [] (double depth)
+        {
+            GrainLockProcessor old;
+            auto xml = old.apvts.copyState().createXml();
+
+            // Strip the new LFO parameters and add v0.1's, so this is exactly what v0.1 saved.
+            juce::Array<juce::XmlElement*> newNodes;
+            for (auto* node : xml->getChildWithTagNameIterator ("PARAM"))
+                if (node->getStringAttribute ("id").containsIgnoreCase ("Lfo"))
+                    newNodes.add (node);
+            for (auto* node : newNodes)
+                xml->removeChildElement (node, true);
+
+            const std::pair<const char*, double> legacy[] = {
+                { "lfoRate", 3.5 }, { "lfoSync", 5.0 }, { "lfoShape", 2.0 }, { "lfoDepth", depth }, { "lfoTarget", 1.0 }
+            };
+            for (const auto& [id, value] : legacy)
+            {
+                auto* node = xml->createNewChildElement ("PARAM");
+                node->setAttribute ("id", id);
+                node->setAttribute ("value", value);
+            }
+
+            juce::MemoryBlock block;
+            juce::AudioProcessor::copyXmlToBinary (*xml, block);
+            return block;
+        };
+
+        {
+            const auto block = legacyState (40.0);
+            GrainLockProcessor restored;
+            restored.setStateInformation (block.getData(), (int) block.getSize());
+            auto value = [&restored] (const char* id) { return restored.apvts.getRawParameterValue (id)->load(); };
+
+            const bool formantMoved = value (ParamID::formantLfoOn) > 0.5f
+                                   && std::abs (value (ParamID::formantLfoRate) - 3.5f) < 0.01f
+                                   && juce::roundToInt (value (ParamID::formantLfoSync)) == 5
+                                   && juce::roundToInt (value (ParamID::formantLfoShape)) == 2
+                                   && std::abs (value (ParamID::formantLfoDepth) - 40.0f) < 0.01f;
+            const bool othersOff = value (ParamID::pitchLfoOn) < 0.5f && value (ParamID::grainLfoOn) < 0.5f;
+            check (formantMoved && othersOff, "old Formant-target LFO (3.5 Hz, 1/4, square, 40%) lands on the Formant LFO, others off");
+        }
+
+        {
+            const auto block = legacyState (0.0);
+            GrainLockProcessor restored;
+            restored.setStateInformation (block.getData(), (int) block.getSize());
+            bool allOff = true;
+            for (const auto& ids : ParamID::lfo)
+                allOff = allOff && restored.apvts.getRawParameterValue (ids.on)->load() < 0.5f
+                                && std::abs (restored.apvts.getRawParameterValue (ids.depth)->load() - 50.0f) < 0.01f;
+            check (allOff, "old LFO at zero depth: all three new LFOs off, at their default depth");
+        }
+    }
+
     void testHostGarbage()
     {
         section ("Extra: NaN and infinite host values are ignored");
@@ -885,9 +1005,13 @@ namespace
         playHead.ppq = std::numeric_limits<double>::quiet_NaN();
         h.proc.setPlayHead (&playHead);
 
-        h.set (ParamID::lfoSync, 9.0f);
-        h.set (ParamID::lfoShape, (float) (int) LfoShape::sampleHold);
-        h.set (ParamID::lfoDepth, 100.0f);
+        for (const auto& ids : ParamID::lfo)
+        {
+            h.set (ids.on, 1.0f);
+            h.set (ids.sync, 9.0f);
+            h.set (ids.shape, (float) (int) LfoShape::sampleHold);
+            h.set (ids.depth, 100.0f);
+        }
         for (const char* id : { ParamID::formant, ParamID::fine, ParamID::smooth, ParamID::sustain })
             h.proc.apvts.getParameter (id)->setValueNotifyingHost (std::numeric_limits<float>::quiet_NaN());
 
@@ -1005,7 +1129,7 @@ namespace
 
     /** Plays a chord into a preset and renders the real interface (2x) to a PNG, exactly as the
         editor draws it, including the loop display fed through the audio thread's FIFO. */
-    bool renderSnapshot (const juce::File& file, const char* presetName, std::initializer_list<int> chord)
+    bool renderSnapshot (const juce::File& file, const char* presetName, std::initializer_list<int> chord, int lfoTab)
     {
         const double rate = 48000.0;
         const int block = 1600;   // one display frame per block
@@ -1015,6 +1139,7 @@ namespace
         proc.prepareToPlay (rate, block);
         if (const int index = proc.getPresetIndex (presetName); index >= 0)
             proc.loadPreset (index);
+        proc.apvts.state.setProperty ("lfoTab", lfoTab, nullptr);
 
         ui::GrainLookAndFeel lookAndFeel;
         ui::MainPanel panel (proc);
@@ -1076,8 +1201,8 @@ namespace
         const auto dir = juce::File::getCurrentWorkingDirectory().getChildFile (directory);
         dir.createDirectory();
 
-        bool ok = renderSnapshot (dir.getChildFile ("grainlock-formant-choir.png"), "Formant Choir", { 57, 60, 64, 67 });
-        ok = renderSnapshot (dir.getChildFile ("grainlock-glitch-drums.png"), "Glitch Drums", { 48, 55 }) && ok;
+        bool ok = renderSnapshot (dir.getChildFile ("grainlock-formant-choir.png"), "Formant Choir", { 57, 60, 64, 67 }, (int) LfoTarget::formant);
+        ok = renderSnapshot (dir.getChildFile ("grainlock-glitch-drums.png"), "Glitch Drums", { 48, 55 }, (int) LfoTarget::grainCycles) && ok;
         return ok ? 0 : 1;
     }
 }
@@ -1115,6 +1240,8 @@ int main (int argc, char** argv)
         testBypass();
         testLfoSyncedSampleHold();
         testHostGarbage();
+        testThreeLfosTogether();
+        testLegacyLfoMigration();
     }
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);

@@ -92,15 +92,18 @@ Tips:
 | R | Release: how long the note rings after you let go. |
 | Vel | How much playing harder makes a note louder. At zero, every note is full volume. |
 
-**LFO** (one wobble shared by all notes)
+**LFO**: three separate wobbles, one each for PITCH, FORMANT and GRAIN. Any or all of them can run
+at the same time, each with its own speed, sync, shape and depth. Click a tab to see that LFO's
+controls; its light glows while it is on. A white dot rides on the Fine, Formant and Grain knobs to
+show each LFO moving.
 
 | Control | What it does |
 | --- | --- |
+| On | Switches this LFO on or off. |
 | Rate | Wobble speed in Hz (used when Sync is Free). |
-| Depth | How strong the wobble is. |
+| Depth | How strong the wobble is. At 100%: PITCH swings ±100 cents, FORMANT ±12 semitones, GRAIN ±8 cycles. |
 | Sync | Free, or locked to Cubase's tempo, from 1/1 down to 1/32 (T = triplet). |
 | Shape | Sine, triangle, square, or S&H (a new random step every cycle). |
-| Target | What it wobbles: PITCH (up to ±100 cents), FORMANT (up to ±12 semitones), or GRAIN (the number of cycles). |
 
 **Display and keyboard**: the big display shows one loop of the most recent note, with the
 crossfade (seam) shaded on the right and the notes you are holding as chips. The strip at the
@@ -115,9 +118,9 @@ fine steps, and double-click to reset.
 | --- | --- |
 | Robot Voice | Live mode, 1 cycle, medium smoothing. Talk or sing into it for a robot voice. |
 | Stutter Gate | Hold mode, instant attack, short release. Tight, gated stutters on each note. |
-| Drone Pad | Live mode, 8 cycles, slow fade in and out, a gentle pitch wobble. |
-| Glitch Drums | Hold mode, grabs from well before the key, random steps on Grain. Made for drum loops. |
-| Formant Choir | Live mode, 4 cycles, formant lowered by 5 semitones. Play 4-note chords. |
+| Drone Pad | Live mode, 8 cycles, slow fade in and out, a gentle pitch drift plus a slower formant swell. |
+| Glitch Drums | Hold mode, grabs from well before the key, random steps on Grain (1/16) and pitch (1/8). Made for drum loops. |
+| Formant Choir | Live mode, 4 cycles, formant lowered by 5 semitones, vibrato plus a slow vowel drift. Play 4-note chords. |
 
 ## 6. Something wrong? Tell me
 

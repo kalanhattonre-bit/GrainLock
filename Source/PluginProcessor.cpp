@@ -64,11 +64,17 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
     p.sustainPercent   = value (params.sustain, d.sustainPercent);
     p.releaseMs        = value (params.release, d.releaseMs);
 
-    p.lfoRateHz        = value (params.lfoRate, d.lfoRateHz);
-    p.lfoSync          = asInt (params.lfoSync, d.lfoSync);
-    p.lfoShape         = (LfoShape) juce::jlimit (0, 3, asInt (params.lfoShape, (int) d.lfoShape));
-    p.lfoDepthPercent  = value (params.lfoDepth, d.lfoDepthPercent);
-    p.lfoTarget        = (LfoTarget) juce::jlimit (0, 2, asInt (params.lfoTarget, (int) d.lfoTarget));
+    for (size_t i = 0; i < (size_t) numLfos; ++i)
+    {
+        const auto& refs = params.lfo[i];
+        const auto& fallback = d.lfos[i];
+        auto& l = p.lfos[i];
+        l.on           = asBool (refs.on, fallback.on);
+        l.rateHz       = value (refs.rate, fallback.rateHz);
+        l.sync         = asInt (refs.sync, fallback.sync);
+        l.shape        = (LfoShape) juce::jlimit (0, 3, asInt (refs.shape, (int) fallback.shape));
+        l.depthPercent = value (refs.depth, fallback.depthPercent);
+    }
 
     p.mixPercent       = value (params.mix, d.mixPercent);
     p.dryWhenIdle      = asBool (params.dryWhenIdle, d.dryWhenIdle);
@@ -170,8 +176,13 @@ void GrainLockProcessor::getStateInformation (juce::MemoryBlock& destData)
 void GrainLockProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
+    {
         if (xml->hasTagName (apvts.state.getType()))
+        {
+            migrateLegacyLfoState (*xml);   // v0.1 saved one shared LFO; move it onto the matching new one
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        }
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

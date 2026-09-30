@@ -2,6 +2,7 @@
 
 #include "Controls.h"
 #include "GrainDisplay.h"
+#include "LfoPanel.h"
 
 class GrainLockProcessor;
 
@@ -31,6 +32,7 @@ namespace grainlock::ui
         void stepPreset (int delta);
         juce::String statusText() const;
         float plainValue (const char* id) const;
+        void showLfoPage (int index);
 
         GrainLockProcessor& processor;
         juce::AudioProcessorValueTreeState& state;
@@ -57,12 +59,10 @@ namespace grainlock::ui
         // ENVELOPE
         Knob attack, decay, sustain, release, velSens;
 
-        // LFO
-        Knob lfoRate, lfoDepth;
-        juce::ComboBox lfoSync;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> lfoSyncAttachment;
-        SegmentedControl lfoShape, lfoTarget;
-        juce::Rectangle<int> syncCaption, shapeCaption, targetCaption, captureCaption;
+        // LFO: three LFOs that all run together; the tabs pick which one's controls are shown.
+        LfoTabs lfoTabs;
+        std::array<std::unique_ptr<LfoPage>, numLfos> lfoPages;
+        juce::Rectangle<int> captureCaption;
 
         KeyStrip keys;
 

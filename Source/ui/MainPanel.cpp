@@ -49,11 +49,7 @@ namespace grainlock::ui
           decay       (state, ParamID::decay, "D"),
           sustain     (state, ParamID::sustain, "S"),
           release     (state, ParamID::release, "R"),
-          velSens     (state, ParamID::velSens, "Vel"),
-          lfoRate     (state, ParamID::lfoRate, "Rate"),
-          lfoDepth    (state, ParamID::lfoDepth, "Depth"),
-          lfoShape    (param (state, ParamID::lfoShape), { "Sine", "Triangle", "Square", "S&H" }, paintLfoShapeIcon),
-          lfoTarget   (param (state, ParamID::lfoTarget), { "PITCH", "FORMANT", "GRAIN" })
+          velSens     (state, ParamID::velSens, "Vel")
     {
         for (auto* c : std::initializer_list<juce::Component*> {
                  &previousPreset, &nextPreset, &presetBox, &captureMode, &display,
@@ -61,14 +57,26 @@ namespace grainlock::ui
                  &tune, &fine, &formant, &glide, &mono,
                  &mix, &gain, &dryWhenIdle,
                  &attack, &decay, &sustain, &release, &velSens,
-                 &lfoRate, &lfoDepth, &lfoSync, &lfoShape, &lfoTarget, &keys })
+                 &lfoTabs, &keys })
             addAndMakeVisible (c);
 
         captureMode.textHeight = 12.5f;
-        lfoTarget.textHeight = 11.0f;
 
-        lfoSync.addItemList (lfoSyncChoices(), 1);
-        lfoSyncAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (state, ParamID::lfoSync, lfoSync);
+        for (int i = 0; i < numLfos; ++i)
+        {
+            lfoPages[(size_t) i] = std::make_unique<LfoPage> (state, ParamID::lfo[i]);
+            addChildComponent (*lfoPages[(size_t) i]);
+        }
+
+        // The open tab is part of the saved session, like the window size.
+        lfoTabs.onSelect = [this] (int index)
+        {
+            showLfoPage (index);
+            state.state.setProperty ("lfoTab", index, nullptr);
+        };
+        const int openTab = juce::jlimit (0, numLfos - 1, (int) state.state.getProperty ("lfoTab", 0));
+        lfoTabs.setSelected (openTab);
+        showLfoPage (openTab);
 
         presetBox.getNames = [this]
         {
@@ -125,20 +133,11 @@ namespace grainlock::ui
         layoutRow (body (sections[2]), { &mix, &gain, &dryWhenIdle });
         layoutRow (body (sections[3]), { &attack, &decay, &sustain, &release, &velSens });
 
-        auto lfoArea = body (sections[4]);
-        layoutRow (lfoArea.removeFromLeft (132), { &lfoRate, &lfoDepth });
-        lfoArea.removeFromLeft (10);
-        lfoArea.removeFromRight (4);
-
-        auto topRow = lfoArea.removeFromTop (lfoArea.getHeight() / 2);
-        syncCaption = topRow.removeFromTop (12).withWidth (84);
-        shapeCaption = syncCaption.withX (syncCaption.getRight() + 10).withWidth (topRow.getWidth() - 94);
-        lfoSync.setBounds (topRow.removeFromLeft (84).withHeight (22));
-        topRow.removeFromLeft (10);
-        lfoShape.setBounds (topRow.withHeight (22));
-
-        targetCaption = lfoArea.removeFromTop (12);
-        lfoTarget.setBounds (lfoArea.withHeight (22));
+        // Tabs sit in the LFO caption row, right of the title; the open page fills the body.
+        const auto lfoBounds = sections[4].bounds;
+        lfoTabs.setBounds (lfoBounds.getX() + 58, lfoBounds.getY() + 4, lfoBounds.getWidth() - 64, 18);
+        for (auto& page : lfoPages)
+            page->setBounds (body (sections[4]).withTrimmedRight (4));
 
         keys.setBounds (12, 414, 738, 20);   // stops short of the window's resize corner
     }
@@ -170,12 +169,6 @@ namespace grainlock::ui
             g.drawText (s.title, juce::Rectangle<float> (r.getX() + 18.0f, r.getY() + 6.0f, r.getWidth() - 24.0f, 16.0f),
                         juce::Justification::centredLeft, false);
         }
-
-        g.setColour (Theme::textFaint);
-        g.setFont (Theme::font (10.5f, true, 0.12f));
-        g.drawText ("SYNC", syncCaption, juce::Justification::centredLeft, false);
-        g.drawText ("SHAPE", shapeCaption, juce::Justification::centredLeft, false);
-        g.drawText ("TARGET", targetCaption, juce::Justification::centredLeft, false);
     }
 
     //==============================================================================
@@ -208,15 +201,18 @@ namespace grainlock::ui
         // Controls that do nothing in the current mode fade back (they still work).
         glide.setAlpha (plainValue (ParamID::mono) >= 0.5f ? 1.0f : 0.45f);
         refresh.setAlpha (plainValue (ParamID::captureMode) >= 0.5f ? 1.0f : 0.45f);
-        lfoRate.setAlpha (juce::roundToInt (plainValue (ParamID::lfoSync)) == 0 ? 1.0f : 0.45f);
+        for (int i = 0; i < numLfos; ++i)
+        {
+            lfoPages[(size_t) i]->refresh();
+            lfoTabs.setActive (i, plainValue (ParamID::lfo[i].on) >= 0.5f);
+        }
 
-        // A dot on the knob the LFO is moving, riding at the modulated position.
-        const bool lfoOn = plainValue (ParamID::lfoDepth) > 0.0f;
-        const int target = juce::roundToInt (plainValue (ParamID::lfoTarget));
-        auto modulate = [&] (Knob& knob, int targetIndex, float swingFraction)
+        // A dot on every knob an LFO is moving, riding at the modulated position; all three can move at once.
+        auto modulate = [&] (Knob& knob, int lfoIndex, float swingFraction)
         {
             auto& p = knob.getParameter();
-            knob.setModulation (lfoOn && target == targetIndex, p.getValue() + lastFrame.lfoValue * swingFraction);
+            knob.setModulation (lastFrame.lfoActive[(size_t) lfoIndex],
+                                p.getValue() + lastFrame.lfoValues[(size_t) lfoIndex] * swingFraction);
         };
         modulate (fine, (int) LfoTarget::pitch, lfoPitchRangeSemitones * 100.0f / 200.0f);
         modulate (formant, (int) LfoTarget::formant, lfoFormantRangeSemitones / 24.0f);
@@ -225,6 +221,12 @@ namespace grainlock::ui
         const auto name = processor.getCurrentPresetName();
         if (name != shownPresetName)
             refreshPresetBox();
+    }
+
+    void MainPanel::showLfoPage (int index)
+    {
+        for (int i = 0; i < numLfos; ++i)
+            lfoPages[(size_t) i]->setVisible (i == index);
     }
 
     //==============================================================================

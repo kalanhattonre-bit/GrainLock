@@ -125,12 +125,18 @@ namespace grainlock
         layout.add (floatParam (ParamID::sustain, "Sustain", Range (0.0f, 100.0f, 0.1f), 100.0f, formatPercent));
         layout.add (floatParam (ParamID::release, "Release", skewedRange (1.0f, 5000.0f, 0.1f, 400.0f), 150.0f, formatMs, parseMs));
 
-        // LFO
-        layout.add (floatParam (ParamID::lfoRate, "LFO Rate", skewedRange (0.01f, 30.0f, 0.001f, 2.0f), 1.0f, formatHz));
-        layout.add (choiceParam (ParamID::lfoSync, "LFO Sync", lfoSyncChoices(), 0));
-        layout.add (choiceParam (ParamID::lfoShape, "LFO Shape", { "Sine", "Triangle", "Square", "S&H" }, (int) LfoShape::sine));
-        layout.add (floatParam (ParamID::lfoDepth, "LFO Depth", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
-        layout.add (choiceParam (ParamID::lfoTarget, "LFO Target", { "Pitch", "Formant", "Grain Cycles" }, (int) LfoTarget::pitch));
+        // LFOs: one each for pitch, formant and grain cycles, all able to run at once.
+        const char* lfoNames[] = { "Pitch LFO", "Formant LFO", "Grain LFO" };
+        for (int i = 0; i < numLfos; ++i)
+        {
+            const auto& ids = ParamID::lfo[i];
+            const juce::String name (lfoNames[i]);
+            layout.add (boolParam (ids.on, (name + " On").toRawUTF8(), false));
+            layout.add (floatParam (ids.rate, (name + " Rate").toRawUTF8(), skewedRange (0.01f, 30.0f, 0.001f, 2.0f), 1.0f, formatHz));
+            layout.add (choiceParam (ids.sync, (name + " Sync").toRawUTF8(), lfoSyncChoices(), 0));
+            layout.add (choiceParam (ids.shape, (name + " Shape").toRawUTF8(), { "Sine", "Triangle", "Square", "S&H" }, (int) LfoShape::sine));
+            layout.add (floatParam (ids.depth, (name + " Depth").toRawUTF8(), Range (0.0f, 100.0f, 0.1f), 50.0f, formatPercent));
+        }
 
         // OUTPUT
         layout.add (floatParam (ParamID::mix, "Mix", Range (0.0f, 100.0f, 0.1f), 100.0f, formatPercent));
@@ -165,13 +171,66 @@ namespace grainlock
         decay       = get (ParamID::decay);
         sustain     = get (ParamID::sustain);
         release     = get (ParamID::release);
-        lfoRate     = get (ParamID::lfoRate);
-        lfoSync     = get (ParamID::lfoSync);
-        lfoShape    = get (ParamID::lfoShape);
-        lfoDepth    = get (ParamID::lfoDepth);
-        lfoTarget   = get (ParamID::lfoTarget);
+        for (int i = 0; i < numLfos; ++i)
+        {
+            const auto& ids = ParamID::lfo[i];
+            lfo[(size_t) i] = Lfo { get (ids.on), get (ids.rate), get (ids.sync), get (ids.shape), get (ids.depth) };
+        }
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);
+    }
+
+    void migrateLegacyLfoState (juce::XmlElement& state)
+    {
+        auto findParam = [&state] (const char* id) -> juce::XmlElement*
+        {
+            for (auto* child : state.getChildWithTagNameIterator ("PARAM"))
+                if (child->getStringAttribute ("id") == id)
+                    return child;
+            return nullptr;
+        };
+
+        auto* targetNode = findParam ("lfoTarget");
+        if (targetNode == nullptr)
+            return;   // already the three-LFO layout
+
+        auto valueOf = [&findParam] (const char* id, double fallback)
+        {
+            const auto* node = findParam (id);
+            return node != nullptr ? node->getDoubleAttribute ("value", fallback) : fallback;
+        };
+
+        const int target = juce::jlimit (0, numLfos - 1, juce::roundToInt (targetNode->getDoubleAttribute ("value")));
+        const double rate = valueOf ("lfoRate", 1.0);
+        const double sync = valueOf ("lfoSync", 0.0);
+        const double shape = valueOf ("lfoShape", 0.0);
+        const double depth = valueOf ("lfoDepth", 0.0);
+
+        for (const char* oldId : { "lfoRate", "lfoSync", "lfoShape", "lfoDepth", "lfoTarget" })
+            if (auto* node = findParam (oldId))
+                state.removeChildElement (node, true);
+
+        // An old LFO at zero depth was effectively off: leave the new LFOs at their defaults.
+        if (depth <= 0.0)
+            return;
+
+        auto setParam = [&state, &findParam] (const char* id, double value)
+        {
+            auto* node = findParam (id);
+            if (node == nullptr)
+            {
+                node = state.createNewChildElement ("PARAM");
+                node->setAttribute ("id", id);
+            }
+            node->setAttribute ("value", value);
+        };
+
+        const auto& ids = ParamID::lfo[target];
+        setParam (ids.on, 1.0);
+        setParam (ids.rate, rate);
+        setParam (ids.sync, sync);
+        setParam (ids.shape, shape);
+        setParam (ids.depth, depth);
     }
 }

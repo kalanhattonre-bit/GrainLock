@@ -23,8 +23,8 @@ namespace grainlock::ui
                 latest.numNotes = frame->numNotes;
                 latest.focusNote = frame->focusNote;
                 latest.seamFraction = frame->seamFraction;
-                latest.lfoValue = frame->lfoValue;
-                latest.lfoTarget = frame->lfoTarget;
+                latest.lfoValues = frame->lfoValues;
+                latest.lfoActive = frame->lfoActive;
                 latest.live = frame->live;
                 latest.heldNotes = frame->heldNotes;
                 latest.hasWave = false;
