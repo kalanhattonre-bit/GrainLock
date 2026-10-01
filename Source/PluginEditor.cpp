@@ -4,7 +4,7 @@ using grainlock::ui::Theme;
 
 namespace
 {
-    // The layout is drawn at 780 x 440 and scaled as one piece, from 75% to 200%.
+    // The layout is drawn at 780 x 470 and scaled as one piece, from 75% to 200%.
     constexpr int minWidth = Theme::baseWidth * 3 / 4;
     constexpr int maxWidth = Theme::baseWidth * 2;
 

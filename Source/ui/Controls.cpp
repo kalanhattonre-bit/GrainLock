@@ -276,7 +276,7 @@ namespace grainlock::ui
                 p.lineTo (x0 + w, mid - amp);
                 break;
 
-            default: // sample & hold
+            case 3: // sample & hold
             {
                 const float levels[] = { 0.3f, -0.8f, 0.9f, -0.2f };
                 p.startNewSubPath (x0, mid - amp * levels[0]);
@@ -289,10 +289,159 @@ namespace grainlock::ui
                 }
                 break;
             }
+
+            case 4: // saw: falls (Invert makes it rise)
+                p.startNewSubPath (x0, mid + amp);
+                p.lineTo (x0, mid - amp);
+                p.lineTo (x0 + w, mid + amp);
+                break;
+
+            default: // random: a smooth wander from one value to the next
+            {
+                const float levels[] = { 0.1f, 0.8f, -0.5f, 0.4f, -0.9f, 0.2f };
+                const float step = w / 5.0f;
+                p.startNewSubPath (x0, mid - amp * levels[0]);
+                for (int i = 1; i < 6; ++i)
+                {
+                    const float xa = x0 + step * (float) (i - 1), xb = x0 + step * (float) i;
+                    const float ya = mid - amp * levels[i - 1], yb = mid - amp * levels[i];
+                    p.cubicTo (xa + step * 0.5f, ya, xb - step * 0.5f, yb, xb, yb);
+                }
+                break;
+            }
         }
 
         g.setColour (colour);
         g.strokePath (p, juce::PathStrokeType (1.5f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+    }
+
+    //==============================================================================
+    ChoiceBox::ChoiceBox (juce::AudioProcessorValueTreeState& state, const juce::String& parameterId, const juce::String& caption)
+        : name (caption)
+    {
+        if (auto* choices = dynamic_cast<juce::AudioParameterChoice*> (state.getParameter (parameterId)))
+            box.addItemList (choices->choices, 1);
+        addAndMakeVisible (box);
+        attachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (state, parameterId, box);
+    }
+
+    void ChoiceBox::resized()
+    {
+        auto area = getLocalBounds();
+        area.removeFromBottom (15);
+        box.setBounds (area.withSizeKeepingCentre (juce::jmax (20, area.getWidth() - 4), 24));
+    }
+
+    void ChoiceBox::paint (juce::Graphics& g)
+    {
+        g.setColour (Theme::textDim);
+        g.setFont (Theme::font (12.0f, false, 0.06f));
+        g.drawFittedText (name.toUpperCase(), getLocalBounds().removeFromBottom (15), juce::Justification::centred, 1, 0.8f);
+    }
+
+    //==============================================================================
+    TabStrip::TabStrip (const juce::StringArray& tabNames, bool withLights)
+        : names (tabNames), lights (withLights), active ((size_t) tabNames.size(), false)
+    {
+    }
+
+    void TabStrip::setSelected (int index)
+    {
+        index = juce::jlimit (0, juce::jmax (0, names.size() - 1), index);
+        if (index != selected)
+        {
+            selected = index;
+            repaint();
+        }
+    }
+
+    void TabStrip::setActive (int index, bool isOn)
+    {
+        if (juce::isPositiveAndBelow (index, names.size()) && active[(size_t) index] != isOn)
+        {
+            active[(size_t) index] = isOn;
+            repaint();
+        }
+    }
+
+    int TabStrip::tabAt (juce::Point<float> position) const
+    {
+        if (getWidth() <= 0 || names.isEmpty())
+            return -1;
+        return juce::jlimit (0, names.size() - 1, (int) (position.x * (float) names.size() / (float) getWidth()));
+    }
+
+    void TabStrip::paint (juce::Graphics& g)
+    {
+        const auto bounds = getLocalBounds().toFloat();
+        const int count = juce::jmax (1, names.size());
+        const float tabWidth = bounds.getWidth() / (float) count;
+
+        for (int i = 0; i < names.size(); ++i)
+        {
+            const auto tab = juce::Rectangle<float> (bounds.getX() + tabWidth * (float) i, bounds.getY(),
+                                                     tabWidth, bounds.getHeight()).reduced (2.0f, 0.0f);
+            const bool isSelected = i == selected;
+
+            g.setColour (isSelected ? Theme::panelRaised : (i == hovered ? Theme::panelRaised.withAlpha (0.5f) : Theme::panel));
+            g.fillRoundedRectangle (tab, 4.0f);
+            if (isSelected)
+            {
+                g.setColour (Theme::accent);
+                g.fillRect (juce::Rectangle<float> (tab.getX() + 6.0f, tab.getBottom() - 2.0f, tab.getWidth() - 12.0f, 2.0f));
+            }
+
+            float textLeft = 10.0f;
+            if (lights)
+            {
+                // Amber while this tab's thing is running.
+                const bool isOn = active[(size_t) i];
+                const float d = 7.0f;
+                const auto led = juce::Rectangle<float> (d, d).withCentre ({ tab.getX() + 12.0f, tab.getCentreY() });
+                g.setColour (isOn ? Theme::accent : Theme::track);
+                g.fillEllipse (led);
+                if (isOn)
+                {
+                    g.setColour (Theme::accentAlpha (0.25f));
+                    g.fillEllipse (led.expanded (3.0f));
+                }
+                textLeft = 22.0f;
+            }
+
+            g.setColour (isSelected ? Theme::text : Theme::textDim);
+            g.setFont (Theme::font (11.0f, isSelected, 0.12f));
+            if (lights)
+                g.drawText (names[i], tab.withTrimmedLeft (textLeft), juce::Justification::centredLeft, false);
+            else
+                g.drawText (names[i], tab, juce::Justification::centred, false);
+        }
+    }
+
+    void TabStrip::mouseDown (const juce::MouseEvent& e)
+    {
+        const int index = tabAt (e.position);
+        if (index >= 0 && index != selected)
+        {
+            setSelected (index);
+            if (onSelect)
+                onSelect (index);
+        }
+    }
+
+    void TabStrip::mouseMove (const juce::MouseEvent& e)
+    {
+        const int index = tabAt (e.position);
+        if (index != hovered)
+        {
+            hovered = index;
+            repaint();
+        }
+    }
+
+    void TabStrip::mouseExit (const juce::MouseEvent&)
+    {
+        hovered = -1;
+        repaint();
     }
 
     //==============================================================================

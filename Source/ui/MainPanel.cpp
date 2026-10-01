@@ -26,41 +26,41 @@ namespace grainlock::ui
             g.setColour (Theme::text);
             g.fillEllipse (juce::Rectangle<float> (d * 0.26f, d * 0.26f).withCentre (grain));
         }
+
+        void paintCaption (juce::Graphics& g, const juce::String& title, juce::Rectangle<float> strip)
+        {
+            g.setColour (Theme::accent);
+            g.fillRoundedRectangle (strip.getX(), strip.getY() + 3.0f, 3.0f, 10.0f, 1.5f);
+            g.setColour (Theme::textDim);
+            g.setFont (Theme::font (11.5f, true, 0.2f));
+            g.drawText (title, strip.withTrimmedLeft (8.0f), juce::Justification::centredLeft, false);
+        }
+
+        constexpr int pageTop = 232;       // where the first row of a page starts
+        constexpr int rowHeight = 100;     // caption strip + controls
+        constexpr int rowGap = 4;
+        constexpr int captionHeight = 20;
+        constexpr float fadedAlpha = 0.45f;
     }
 
     MainPanel::MainPanel (GrainLockProcessor& p)
         : processor (p),
           state (p.apvts),
           captureMode (param (state, ParamID::captureMode), { "HOLD", "LIVE" }),
-          grain       (state, ParamID::grainCycles, "Grain"),
-          smooth      (state, ParamID::smooth, "Smooth"),
-          offset      (state, ParamID::offset, "Offset"),
-          refresh     (state, ParamID::refresh, "Refresh"),
-          pitchLock   (state, ParamID::pitchLock, "Lock"),
-          tune        (state, ParamID::tune, "Tune", true),
-          fine        (state, ParamID::fine, "Fine", true),
-          formant     (state, ParamID::formant, "Formant", true),
-          glide       (state, ParamID::glide, "Glide"),
-          mono        (state, ParamID::mono, "Mono"),
           mix         (state, ParamID::mix, "Mix"),
           gain        (state, ParamID::outGain, "Gain", true),
           dryWhenIdle (state, ParamID::dryWhenIdle, "Dry Idle"),
-          attack      (state, ParamID::attack, "A"),
-          decay       (state, ParamID::decay, "D"),
-          sustain     (state, ParamID::sustain, "S"),
-          release     (state, ParamID::release, "R"),
-          velSens     (state, ParamID::velSens, "Vel")
+          autoGain    (state, ParamID::autoGain, "Auto Gain"),
+          pageTabs    ({ "FREEZE", "PLAY", "MOTION", "KEYS", "TONE" }, false),
+          lfoTabs     ({ "PITCH", "FORMANT", "GRAIN" }, true)
     {
         for (auto* c : std::initializer_list<juce::Component*> {
                  &previousPreset, &nextPreset, &presetBox, &captureMode, &display,
-                 &grain, &smooth, &offset, &refresh, &pitchLock,
-                 &tune, &fine, &formant, &glide, &mono,
-                 &mix, &gain, &dryWhenIdle,
-                 &attack, &decay, &sustain, &release, &velSens,
-                 &lfoTabs, &keys })
+                 &mix, &gain, &dryWhenIdle, &autoGain, &pageTabs, &keys })
             addAndMakeVisible (c);
 
         captureMode.textHeight = 12.5f;
+        addChildComponent (lfoTabs);
 
         for (int i = 0; i < numLfos; ++i)
         {
@@ -68,15 +68,25 @@ namespace grainlock::ui
             addChildComponent (*lfoPages[(size_t) i]);
         }
 
-        // The open tab is part of the saved session, like the window size.
+        buildPages();
+        finishPages();
+
+        // The open page and the open LFO tab are part of the saved session, like the window size.
         lfoTabs.onSelect = [this] (int index)
         {
             showLfoPage (index);
             state.state.setProperty ("lfoTab", index, nullptr);
         };
-        const int openTab = juce::jlimit (0, numLfos - 1, (int) state.state.getProperty ("lfoTab", 0));
-        lfoTabs.setSelected (openTab);
-        showLfoPage (openTab);
+        lfoTabs.setSelected (juce::jlimit (0, numLfos - 1, (int) state.state.getProperty ("lfoTab", 0)));
+
+        pageTabs.onSelect = [this] (int index)
+        {
+            showPage (index);
+            state.state.setProperty ("page", index, nullptr);
+        };
+        const int openPage = juce::jlimit (0, numPages - 1, (int) state.state.getProperty ("page", 0));
+        pageTabs.setSelected (openPage);
+        showPage (openPage);
 
         presetBox.getNames = [this]
         {
@@ -95,18 +105,119 @@ namespace grainlock::ui
     }
 
     //==============================================================================
-    void MainPanel::layoutRow (juce::Rectangle<int> area, std::initializer_list<juce::Component*> cells)
+    MainPanel::Cell MainPanel::knob (const char* id, const char* label, bool bipolar)
     {
-        const int n = (int) cells.size();
-        const float w = (float) area.getWidth() / (float) n;
-        int i = 0;
-        for (auto* c : cells)
-        {
-            const int x0 = area.getX() + juce::roundToInt (w * (float) i);
-            const int x1 = area.getX() + juce::roundToInt (w * (float) (i + 1));
-            c->setBounds (juce::Rectangle<int> (x0, area.getY(), x1 - x0, area.getHeight()).reduced (2, 0));
-            ++i;
-        }
+        auto control = std::make_unique<Knob> (state, id, label, bipolar);
+        auto* raw = control.get();
+        addChildComponent (*raw);
+        byId[id] = raw;
+        owned.push_back (std::move (control));
+        return { raw, 1 };
+    }
+
+    MainPanel::Cell MainPanel::pill (const char* id, const char* label)
+    {
+        auto control = std::make_unique<PillToggle> (state, id, label);
+        auto* raw = control.get();
+        addChildComponent (*raw);
+        byId[id] = raw;
+        owned.push_back (std::move (control));
+        return { raw, 1 };
+    }
+
+    MainPanel::Cell MainPanel::choice (const char* id, const char* label)
+    {
+        auto control = std::make_unique<ChoiceBox> (state, id, label);
+        auto* raw = control.get();
+        addChildComponent (*raw);
+        byId[id] = raw;
+        owned.push_back (std::move (control));
+        return { raw, 2 };
+    }
+
+    void MainPanel::buildPages()
+    {
+        // FREEZE: what a note grabs, and when.
+        pages[0].rows[0] = {
+            Group { "GRAIN",    { knob (ParamID::grainCycles, "Grain"), knob (ParamID::smooth, "Smooth"), pill (ParamID::pitchLock, "Lock") } },
+            Group { "TIMING",   { knob (ParamID::offset, "Offset"), choice (ParamID::offsetSync, "Offset Sync"),
+                                  knob (ParamID::refresh, "Refresh"), choice (ParamID::refreshSync, "Refresh Sync") } },
+            Group { "GRID",     { pill (ParamID::gridGrabs, "On Grid"), knob (ParamID::skipChance, "Skip") } },
+            Group { "FEEDBACK", { knob (ParamID::feedback, "Amount"), gap() } } };
+        pages[0].rows[1] = {
+            Group { "GRAB",     { choice (ParamID::grabAt, "Grab"), knob (ParamID::wait, "Wait"), choice (ParamID::waitSync, "Wait Sync"),
+                                  knob (ParamID::snap, "Snap") } },
+            Group { "INPUT",    { knob (ParamID::threshold, "Thresh"), knob (ParamID::maxWait, "Max Wait"),
+                                  pill (ParamID::skipHiss, "Skip Hiss"), pill (ParamID::gate, "Gate") } } };
+
+        // PLAY: the note itself.
+        pages[1].rows[0] = {
+            Group { "PITCH",    { knob (ParamID::tune, "Tune", true), knob (ParamID::fine, "Fine", true) } },
+            Group { "FORMANT",  { knob (ParamID::formant, "Formant", true), wide (pill (ParamID::formantTrack, "Key Follow")) } },
+            Group { "GLIDE",    { knob (ParamID::glide, "Glide"), pill (ParamID::glideLegato, "Legato"),
+                                  pill (ParamID::glideRate, "Per Oct"), pill (ParamID::polyGlide, "Poly") } },
+            Group { "VOICES",   { pill (ParamID::mono, "Mono"), knob (ParamID::voices, "Voices") } } };
+        pages[1].rows[1] = {
+            Group { "AMP ENVELOPE", { knob (ParamID::attack, "A"), knob (ParamID::decay, "D"), knob (ParamID::sustain, "S"),
+                                      knob (ParamID::release, "R"), knob (ParamID::velSens, "Vel") } } };
+
+        // MOTION: the first row is the LFO (its own component); the second, what moves once per note.
+        pages[motionPage].rows[0] = { Group { "LFO", {} } };
+        pages[motionPage].rows[1] = {
+            Group { "NOTE ENVELOPE", { knob (ParamID::envAttack, "A"), knob (ParamID::envDecay, "D"), knob (ParamID::envPitch, "Pitch", true),
+                                       knob (ParamID::envFormant, "Formant", true), knob (ParamID::envGrain, "Grain", true),
+                                       pill (ParamID::tapeStop, "Tape Stop") } },
+            Group { "VIBRATO",  { knob (ParamID::vibRate, "Rate"), knob (ParamID::vibDepth, "Depth") } } };
+
+        // KEYS: what the keyboard's other controls do, and when a note ends.
+        pages[3].rows[0] = {
+            Group { "BEND",       { knob (ParamID::bendUp, "Up"), knob (ParamID::bendDown, "Down") } },
+            Group { "MOD WHEEL",  { choice (ParamID::wheelDest, "Moves"), knob (ParamID::wheelAmt, "Amount", true) } },
+            Group { "AFTERTOUCH", { choice (ParamID::touchDest, "Moves"), knob (ParamID::touchAmt, "Amount", true) } },
+            Group { "EXPRESSION", { choice (ParamID::exprDest, "Moves"), knob (ParamID::exprAmt, "Amount", true) } } };
+        pages[3].rows[1] = {
+            Group { "KEY UP",   { choice (ParamID::keyUpMode, "Mode"), choice (ParamID::noteLength, "Length"),
+                                  pill (ParamID::sustainPedal, "Sus Pedal") } } };
+
+        // TONE: on the frozen sound only.
+        pages[4].rows[0] = {
+            Group { "FILTER",   { knob (ParamID::lowCut, "Low Cut"), knob (ParamID::highCut, "High Cut"), knob (ParamID::tilt, "Tilt", true) } },
+            Group { "COLOUR",   { knob (ParamID::drive, "Drive"), knob (ParamID::hollow, "Hollow"), knob (ParamID::diffuse, "Diffuse") } } };
+        pages[4].rows[1] = {
+            Group { "STEREO",   { knob (ParamID::spread, "Spread"), choice (ParamID::spreadMode, "Spread Mode"),
+                                  knob (ParamID::width, "Width"), knob (ParamID::drift, "Drift") } } };
+    }
+
+    void MainPanel::finishPages()
+    {
+        for (auto& page : pages)
+            for (auto& row : page.rows)
+            {
+                int next = 0;
+                for (auto& group : row)
+                {
+                    group.firstCell = next;
+                    for (const auto& cell : group.cells)
+                        next += cell.span;
+                    group.numCells = next - group.firstCell;
+                }
+                jassert (next <= cellsPerRow);
+            }
+
+        pages[motionPage].rows[0].front().numCells = cellsPerRow;
+    }
+
+    //==============================================================================
+    juce::Rectangle<int> MainPanel::rowBounds (int row) const
+    {
+        return { 12, pageTop + row * (rowHeight + rowGap), 756, rowHeight };
+    }
+
+    juce::Rectangle<int> MainPanel::cellBounds (int row, int firstCell, int span) const
+    {
+        const auto r = rowBounds (row);
+        return juce::Rectangle<int> (r.getX() + 1 + cellWidth * firstCell, r.getY() + captionHeight,
+                                     cellWidth * span, rowHeight - captionHeight - 4).reduced (2, 0);
     }
 
     void MainPanel::resized()
@@ -118,28 +229,36 @@ namespace grainlock::ui
         captureCaption = { 560, 10, 62, 24 };
         captureMode.setBounds (628, 10, 140, 24);
 
-        display.setBounds (12, 50, 756, 150);
+        // The display, with the OUTPUT block to its right.
+        display.setBounds (12, 50, 618, 150);
+        outputPanel = { 636, 50, 132, 150 };
+        mix.setBounds (642, 72, 60, 70);
+        gain.setBounds (702, 72, 60, 70);
+        dryWhenIdle.setBounds (642, 146, 60, 48);
+        autoGain.setBounds (702, 146, 60, 48);
 
-        sections = { Section { "FREEZE",   { 12, 206, 286, 104 } },
-                     Section { "VOICE",    { 304, 206, 286, 104 } },
-                     Section { "OUTPUT",   { 596, 206, 172, 104 } },
-                     Section { "ENVELOPE", { 12, 314, 300, 94 } },
-                     Section { "LFO",      { 318, 314, 450, 94 } } };
+        pageTabs.setBounds (12, 206, 520, 22);
 
-        auto body = [] (const Section& s) { return s.bounds.reduced (6, 4).withTrimmedTop (18); };
+        for (auto& page : pages)
+            for (int r = 0; r < 2; ++r)
+                for (const auto& group : page.rows[(size_t) r])
+                {
+                    int at = group.firstCell;
+                    for (const auto& cell : group.cells)
+                    {
+                        if (cell.component != nullptr)
+                            cell.component->setBounds (cellBounds (r, at, cell.span));
+                        at += cell.span;
+                    }
+                }
 
-        layoutRow (body (sections[0]), { &grain, &smooth, &offset, &refresh, &pitchLock });
-        layoutRow (body (sections[1]), { &tune, &fine, &formant, &glide, &mono });
-        layoutRow (body (sections[2]), { &mix, &gain, &dryWhenIdle });
-        layoutRow (body (sections[3]), { &attack, &decay, &sustain, &release, &velSens });
-
-        // Tabs sit in the LFO caption row, right of the title; the open page fills the body.
-        const auto lfoBounds = sections[4].bounds;
-        lfoTabs.setBounds (lfoBounds.getX() + 58, lfoBounds.getY() + 4, lfoBounds.getWidth() - 64, 18);
+        // The LFO tabs sit in the caption strip of MOTION's first row; the open LFO fills the row.
+        const auto lfoRow = rowBounds (0);
+        lfoTabs.setBounds (lfoRow.getX() + 1 + cellWidth, lfoRow.getY() + 2, 330, 18);
         for (auto& page : lfoPages)
-            page->setBounds (body (sections[4]).withTrimmedRight (4));
+            page->setBounds (lfoRow.getX() + 1, lfoRow.getY() + captionHeight, cellWidth * cellsPerRow, rowHeight - captionHeight - 4);
 
-        keys.setBounds (12, 414, 738, 20);   // stops short of the window's resize corner
+        keys.setBounds (12, 442, 738, 20);   // stops short of the window's resize corner
     }
 
     void MainPanel::paint (juce::Graphics& g)
@@ -156,18 +275,34 @@ namespace grainlock::ui
         g.setFont (Theme::font (11.0f, true, 0.15f));
         g.drawText ("CAPTURE", captureCaption, juce::Justification::centredRight, false);
 
-        for (const auto& s : sections)
+        // OUTPUT
         {
-            const auto r = s.bounds.toFloat();
+            const auto r = outputPanel.toFloat();
+            g.setColour (Theme::panel);
+            g.fillRoundedRectangle (r, Theme::corner);
+            paintCaption (g, "OUTPUT", { r.getX() + 10.0f, r.getY() + 5.0f, r.getWidth() - 16.0f, 16.0f });
+        }
+
+        // The open page: two rows, each a panel with its groups named along the top.
+        const auto& page = pages[(size_t) currentPage];
+        for (int row = 0; row < 2; ++row)
+        {
+            const auto r = rowBounds (row).toFloat();
             g.setColour (Theme::panel);
             g.fillRoundedRectangle (r, Theme::corner);
 
-            g.setColour (Theme::accent);
-            g.fillRoundedRectangle (r.getX() + 10.0f, r.getY() + 9.0f, 3.0f, 10.0f, 1.5f);
-            g.setColour (Theme::textDim);
-            g.setFont (Theme::font (11.5f, true, 0.2f));
-            g.drawText (s.title, juce::Rectangle<float> (r.getX() + 18.0f, r.getY() + 6.0f, r.getWidth() - 24.0f, 16.0f),
-                        juce::Justification::centredLeft, false);
+            for (const auto& group : page.rows[(size_t) row])
+            {
+                const float x = r.getX() + 1.0f + (float) (cellWidth * group.firstCell);
+                const float width = (float) (cellWidth * group.numCells);
+                paintCaption (g, group.title, { x + 9.0f, r.getY() + 4.0f, width - 14.0f, 16.0f });
+
+                if (group.firstCell > 0)
+                {
+                    g.setColour (Theme::outline);
+                    g.drawVerticalLine (juce::roundToInt (x), r.getY() + 26.0f, r.getBottom() - 12.0f);
+                }
+            }
         }
     }
 
@@ -183,11 +318,95 @@ namespace grainlock::ui
         const bool lockOn = plainValue (ParamID::pitchLock) >= 0.5f;
         const int cycles = juce::roundToInt (plainValue (ParamID::grainCycles));
 
-        juce::String text = live ? "LIVE  /  REFRESH " + state.getParameter (ParamID::refresh)->getCurrentValueAsText().toUpperCase()
-                                 : juce::String ("HOLD");
+        juce::String text ("HOLD");
+        if (live)
+        {
+            // A Refresh that follows the tempo shows its note value; the knob's ms mean nothing then.
+            const bool synced = juce::roundToInt (plainValue (ParamID::refreshSync)) != 0;
+            text = "LIVE  /  REFRESH " + state.getParameter (synced ? ParamID::refreshSync : ParamID::refresh)->getCurrentValueAsText().toUpperCase();
+            if (synced && plainValue (ParamID::gridGrabs) >= 0.5f)
+                text << "  /  GRID";
+        }
+
         text << "  /  " << cycles << (cycles == 1 ? " CYCLE" : " CYCLES");
         text << (lockOn ? "  /  PITCH LOCKED" : "  /  LOOP " + juce::String (cycles) + "X LONGER");
         return text;
+    }
+
+    juce::String MainPanel::waitingText() const
+    {
+        // Why a key that is down is not sounding yet.
+        if (plainValue (ParamID::threshold) > thresholdOffDb)
+            return "WAITING FOR SOUND";
+        if (plainValue (ParamID::snap) > 0.0f)
+            return "WAITING FOR A HIT";
+        return "WAITING TO GRAB";
+    }
+
+    void MainPanel::fade (const char* id, bool isLive)
+    {
+        const auto found = byId.find (id);
+        if (found != byId.end())
+            found->second->setAlpha (isLive ? 1.0f : fadedAlpha);
+    }
+
+    void MainPanel::updateFades()
+    {
+        // A control that does nothing with the other settings as they are fades back. It still works
+        // (turning it is how you find out), and what decides is always other controls, never the
+        // song or the keyboard, so nothing flickers.
+        auto on = [this] (const char* id) { return plainValue (id) >= 0.5f; };
+        auto index = [this] (const char* id) { return juce::roundToInt (plainValue (id)); };
+
+        const bool live = on (ParamID::captureMode);
+        const bool refreshFree = index (ParamID::refreshSync) == 0;
+        const bool mono = on (ParamID::mono);
+        const bool glideLive = mono || on (ParamID::polyGlide);
+        const bool thresholdOn = plainValue (ParamID::threshold) > thresholdOffDb;
+        const auto keyUp = (KeyUpMode) index (ParamID::keyUpMode);
+
+        fade (ParamID::refresh, live && refreshFree);
+        fade (ParamID::refreshSync, live);
+        fade (ParamID::skipHiss, live);
+        fade (ParamID::skipChance, live);
+        fade (ParamID::gridGrabs, live && ! refreshFree);
+        fade (ParamID::offset, index (ParamID::offsetSync) == 0);
+        fade (ParamID::wait, index (ParamID::waitSync) == 0);
+        fade (ParamID::maxWait, thresholdOn);
+        fade (ParamID::gate, thresholdOn);
+
+        fade (ParamID::glide, glideLive);
+        fade (ParamID::glideLegato, glideLive && plainValue (ParamID::glide) > 0.0f);
+        fade (ParamID::glideRate, glideLive && plainValue (ParamID::glide) > 0.0f);
+        fade (ParamID::polyGlide, ! mono);
+        fade (ParamID::voices, ! mono);
+
+        const bool envInUse = ! juce::exactlyEqual (plainValue (ParamID::envPitch), 0.0f)
+                              || ! juce::exactlyEqual (plainValue (ParamID::envFormant), 0.0f)
+                              || index (ParamID::envGrain) != 0;
+        fade (ParamID::envAttack, envInUse);
+        fade (ParamID::envDecay, envInUse);
+
+        bool vibratoInUse = false;
+        for (const auto& source : ParamID::source)
+        {
+            const auto dest = (ModDest) index (source.dest);
+            vibratoInUse = vibratoInUse || dest == ModDest::vibrato;
+            fade (source.amount, dest != ModDest::off);
+        }
+        fade (ParamID::vibRate, vibratoInUse);
+        fade (ParamID::vibDepth, vibratoInUse);
+
+        fade (ParamID::noteLength, keyUp == KeyUpMode::toGrid || keyUp == KeyUpMode::fixed);
+        fade (ParamID::sustainPedal, keyUp == KeyUpMode::normal || keyUp == KeyUpMode::toGrid);
+        fade (ParamID::spreadMode, plainValue (ParamID::spread) > 0.0f);
+
+        // Auto Gain evens out the summed cycles of a Pitch-Locked loop: with one cycle there is nothing to even out.
+        bool severalCycles = index (ParamID::grainCycles) > 1 || index (ParamID::envGrain) > 0
+                             || (on (ParamID::grainLfoOn) && plainValue (ParamID::grainLfoDepth) > 0.0f);
+        for (const auto& source : ParamID::source)
+            severalCycles = severalCycles || ((ModDest) index (source.dest) == ModDest::grain && plainValue (source.amount) > 0.0f);
+        autoGain.setAlpha (on (ParamID::pitchLock) && severalCycles ? 1.0f : fadedAlpha);
     }
 
     void MainPanel::tick (const ScopeFrame* frame)
@@ -195,12 +414,10 @@ namespace grainlock::ui
         if (frame != nullptr)
             lastFrame = *frame;
 
-        display.update (frame, statusText());
-        keys.setHeldNotes (lastFrame.heldNotes);
+        display.update (frame, statusText(), waitingText());
+        keys.setNotes (lastFrame.heldNotes, lastFrame.waitingNotes);
 
-        // Controls that do nothing in the current mode fade back (they still work).
-        glide.setAlpha (plainValue (ParamID::mono) >= 0.5f ? 1.0f : 0.45f);
-        refresh.setAlpha (plainValue (ParamID::captureMode) >= 0.5f ? 1.0f : 0.45f);
+        updateFades();
         for (int i = 0; i < numLfos; ++i)
         {
             lfoPages[(size_t) i]->refresh();
@@ -208,25 +425,42 @@ namespace grainlock::ui
         }
 
         // A dot on every knob an LFO is moving, riding at the modulated position; all three can move at once.
-        auto modulate = [&] (Knob& knob, int lfoIndex, float swingFraction)
+        auto modulate = [this] (const char* id, int lfoIndex, float swingFraction)
         {
-            auto& p = knob.getParameter();
-            knob.setModulation (lastFrame.lfoActive[(size_t) lfoIndex],
-                                p.getValue() + lastFrame.lfoValues[(size_t) lfoIndex] * swingFraction);
+            const auto found = byId.find (id);
+            if (auto* target = found != byId.end() ? dynamic_cast<Knob*> (found->second) : nullptr)
+                target->setModulation (lastFrame.lfoActive[(size_t) lfoIndex],
+                                       target->getParameter().getValue() + lastFrame.lfoValues[(size_t) lfoIndex] * swingFraction);
         };
-        modulate (fine, (int) LfoTarget::pitch, lfoPitchRangeSemitones * 100.0f / 200.0f);
-        modulate (formant, (int) LfoTarget::formant, lfoFormantRangeSemitones / 24.0f);
-        modulate (grain, (int) LfoTarget::grainCycles, lfoCyclesRange / (float) (maxCycles - minCycles));
+        modulate (ParamID::fine, (int) LfoTarget::pitch, lfoPitchRangeSemitones * 100.0f / 200.0f);
+        modulate (ParamID::formant, (int) LfoTarget::formant, lfoFormantRangeSemitones / 24.0f);
+        modulate (ParamID::grainCycles, (int) LfoTarget::grainCycles, lfoCyclesRange / (float) (maxCycles - minCycles));
 
         const auto name = processor.getCurrentPresetName();
         if (name != shownPresetName)
             refreshPresetBox();
     }
 
+    void MainPanel::showPage (int index)
+    {
+        currentPage = juce::jlimit (0, numPages - 1, index);
+
+        for (int p = 0; p < numPages; ++p)
+            for (const auto& row : pages[(size_t) p].rows)
+                for (const auto& group : row)
+                    for (const auto& cell : group.cells)
+                        if (cell.component != nullptr)
+                            cell.component->setVisible (p == currentPage);
+
+        lfoTabs.setVisible (currentPage == motionPage);
+        showLfoPage (lfoTabs.getSelected());
+        repaint();
+    }
+
     void MainPanel::showLfoPage (int index)
     {
         for (int i = 0; i < numLfos; ++i)
-            lfoPages[(size_t) i]->setVisible (i == index);
+            lfoPages[(size_t) i]->setVisible (currentPage == motionPage && i == index);
     }
 
     //==============================================================================

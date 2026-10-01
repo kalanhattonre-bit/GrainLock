@@ -106,11 +106,11 @@ namespace grainlock
         songRunning = timing.playing && timing.hasPpq;
         songPpq = timing.ppq;
         beatsPerSample = (timing.bpm >= 1.0 ? timing.bpm : 120.0) / 60.0 / sampleRate;
-        holdLineBeats = holdTimeBeats (params.holdTime);
+        holdLineBeats = noteLengthBeats (params.noteLength);
         if (! songWasRunning && songRunning)
             keysAtStop.fill (0);   // the song is running again: Latch takes no notice of key-ups, as usual
 
-        const HoldMode previousHoldMode = block.holdMode;
+        const KeyUpMode previousKeyUpMode = block.keyUpMode;
         const bool pedalWasOn = block.sustainPedal;
 
         monoMode = params.mono;
@@ -118,9 +118,9 @@ namespace grainlock
 
         if (! firstBlock)
         {
-            // Changing Hold Mode is the way to stop what the old mode was holding: every count ends,
+            // Changing Key Up Mode is the way to stop what the old mode was holding: every count ends,
             // and notes whose key is up are released (the pedal still holds them where it counts).
-            if (params.holdMode != previousHoldMode)
+            if (params.keyUpMode != previousKeyUpMode)
             {
                 keysAtStop.fill (0);
                 for (auto& voice : voices)
@@ -129,7 +129,7 @@ namespace grainlock
                     releaseKeysUp (-1.0);
 
                 // Into Full: a note whose key is down gets its length from now (the key will not end it).
-                if (params.holdMode == HoldMode::full)
+                if (params.keyUpMode == KeyUpMode::fixed)
                     for (auto& voice : voices)
                         if (voice.isHeld())
                             voice.releaseInBeats (holdLineBeats);
@@ -139,7 +139,7 @@ namespace grainlock
             if (pedalWasOn && ! params.sustainPedal && pedalDown)
             {
                 pedalDown = false;
-                if (params.holdMode == HoldMode::normal || params.holdMode == HoldMode::onGrid)
+                if (params.keyUpMode == KeyUpMode::normal || params.keyUpMode == KeyUpMode::toGrid)
                     releaseKeysUp (-1.0);
             }
 
@@ -147,13 +147,13 @@ namespace grainlock
             // ends, so Stop is never followed by a drone. (Latch works as usual while stopped.)
             if (songWasRunning && ! songRunning)
             {
-                if (params.holdMode == HoldMode::onGrid)
+                if (params.keyUpMode == KeyUpMode::toGrid)
                 {
                     for (auto& voice : voices)
                         if (voice.hasHoldTimer())
                             voice.release();
                 }
-                else if (params.holdMode == HoldMode::latch)
+                else if (params.keyUpMode == KeyUpMode::latch)
                 {
                     // A host sends the key-ups of its track's notes because of the stop, so they can
                     // arrive after it: the keys still down now end their notes when they come up.
@@ -1003,7 +1003,7 @@ namespace grainlock
             setKey (d1, true);
             keysAtStop[(size_t) (d1 >> 6)] &= ~((juce::uint64) 1 << (d1 & 63));
 
-            if (block.holdMode == HoldMode::latch && ! monoMode)
+            if (block.keyUpMode == KeyUpMode::latch && ! monoMode)
             {
                 if (! overlap)
                 {
@@ -1043,10 +1043,10 @@ namespace grainlock
             keysAtStop[(size_t) (d1 >> 6)] &= ~keyBit;
 
             // Latch and Full take no notice of a key coming up; the pedal holds it in Normal and On Grid.
-            if ((block.holdMode == HoldMode::latch && ! endsAtStop) || block.holdMode == HoldMode::full || pedalHolds())
+            if ((block.keyUpMode == KeyUpMode::latch && ! endsAtStop) || block.keyUpMode == KeyUpMode::fixed || pedalHolds())
                 return;
 
-            const double deferBeats = block.holdMode == HoldMode::onGrid ? beatsToNextLine() : -1.0;
+            const double deferBeats = block.keyUpMode == KeyUpMode::toGrid ? beatsToNextLine() : -1.0;
             if (monoMode) monoNoteOff (d1, deferBeats);
             else          noteOff (d1, deferBeats);
         }
@@ -1071,7 +1071,7 @@ namespace grainlock
                     const bool counted = pedalHolds();
                     pedalDown = down;
                     if (lifted && counted)
-                        releaseKeysUp (block.holdMode == HoldMode::onGrid ? beatsToNextLine() : -1.0);
+                        releaseKeysUp (block.keyUpMode == KeyUpMode::toGrid ? beatsToNextLine() : -1.0);
                 }
             }
             else if (d1 == 121)                                     // reset controllers
@@ -1202,7 +1202,7 @@ namespace grainlock
 
     void GrainEngine::startHoldLength (GrainVoice& voice) noexcept
     {
-        if (block.holdMode == HoldMode::full)
+        if (block.keyUpMode == KeyUpMode::fixed)
             voice.releaseInBeats (holdLineBeats);
     }
 
@@ -1494,7 +1494,7 @@ namespace grainlock
         for (int k = 0; k < frame.numNotes; ++k)
             frame.notes[(size_t) k] = voices[(size_t) order[(size_t) k]].getNote();
 
-        if (monoMode && (block.holdMode == HoldMode::normal || block.holdMode == HoldMode::onGrid))
+        if (monoMode && (block.keyUpMode == KeyUpMode::normal || block.keyUpMode == KeyUpMode::toGrid))
         {
             for (int s = 0; s < stackSize; ++s)
                 frame.setHeld (noteStack[(size_t) s]);

@@ -99,8 +99,8 @@ namespace grainlock::ParamID
 
     // 0.3: how notes are held and how many play.
     inline constexpr const char* sustainPedal = "sustainPedal";
-    inline constexpr const char* holdMode     = "holdMode";
-    inline constexpr const char* holdTime     = "holdTime";
+    inline constexpr const char* keyUpMode     = "keyUpMode";
+    inline constexpr const char* noteLength     = "noteLength";
     inline constexpr const char* glideLegato  = "glideLegato";
     inline constexpr const char* glideRate    = "glideRate";
     inline constexpr const char* polyGlide    = "polyGlide";
@@ -138,7 +138,7 @@ namespace grainlock::ParamID
         wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt,
         grabAt, wait, waitSync, offsetSync, refreshSync,
         snap, threshold, maxWait, skipHiss, gate, gridGrabs, skipChance, feedback,
-        sustainPedal, holdMode, holdTime, glideLegato, glideRate, polyGlide, voices,
+        sustainPedal, keyUpMode, noteLength, glideLegato, glideRate, polyGlide, voices,
         lowCut, highCut, tilt, drive, hollow, diffuse, spread, spreadMode, width, drift
     };
 
@@ -199,10 +199,11 @@ namespace grainlock
     enum class ModSource   { wheel = 0, touch, expression };
     inline constexpr int numModSources = 3;
 
-    /** What ends a note. normal: the key (and the sustain pedal). latch: the next chord. onGrid: the
-        key, but on the next grid line. full: the note's own length, whatever the key does. */
-    enum class HoldMode    { normal = 0, latch, onGrid, full };
-    inline constexpr int numHoldModes = 4;
+    /** What ends a note. normal: the key (and the sustain pedal). latch: the next chord. toGrid: the
+        key, but on the next line of the Note Length grid. fixed: the note lasts one Note Length,
+        whatever the key does. */
+    enum class KeyUpMode   { normal = 0, latch, toGrid, fixed };
+    inline constexpr int numKeyUpModes = 4;
 
     /** Where Spread puts each note. alternate: one left, the next right. byPitch: low notes left, high
         notes right (two octaves either side of C3). random: anywhere, the same place for the same note
@@ -249,11 +250,11 @@ namespace grainlock
     /** Threshold at the bottom of its range is off. */
     inline constexpr float thresholdOffDb = -80.0f;
 
-    /** Choice labels for Hold Time: the note values of grabSyncChoices() without "Free". */
-    const juce::StringArray& holdTimeChoices();
+    /** Choice labels for Note Length: the note values of grabSyncChoices() without "Free". */
+    const juce::StringArray& noteLengthChoices();
 
-    /** Length in quarter-note beats of a holdTimeChoices() index. */
-    double holdTimeBeats (int index) noexcept;
+    /** Length in quarter-note beats of a noteLengthChoices() index. */
+    double noteLengthBeats (int index) noexcept;
 
     /** Length of one LFO cycle in quarter-note beats for a sync index, or 0 for free-running. */
     double lfoSyncBeats (int syncIndex) noexcept;
@@ -320,7 +321,7 @@ namespace grainlock
         std::atomic<float> *bendUp, *bendDown, *vibRate, *vibDepth;
         std::atomic<float> *grabAt, *wait, *waitSync, *offsetSync, *refreshSync;
         std::atomic<float> *snap, *threshold, *maxWait, *skipHiss, *gate, *gridGrabs, *skipChance, *feedback;
-        std::atomic<float> *sustainPedal, *holdMode, *holdTime, *glideLegato, *glideRate, *polyGlide, *voices;
+        std::atomic<float> *sustainPedal, *keyUpMode, *noteLength, *glideLegato, *glideRate, *polyGlide, *voices;
         std::atomic<float> *lowCut, *highCut, *tilt, *drive, *hollow, *diffuse, *spread, *spreadMode, *width, *drift;
 
         std::atomic<float>* mix;
