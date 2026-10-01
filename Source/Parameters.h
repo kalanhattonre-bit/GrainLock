@@ -48,6 +48,38 @@ namespace grainlock::ParamID
     inline constexpr const char* formantTrack = "formantTrack";
     inline constexpr const char* autoGain     = "autoGain";
 
+    // 0.3: how each LFO starts (per LFO), the note envelope, and what the keyboard's controllers do.
+    inline constexpr const char* pitchLfoTrig     = "pitchLfoTrig";
+    inline constexpr const char* pitchLfoFade     = "pitchLfoFade";
+    inline constexpr const char* pitchLfoPhase    = "pitchLfoPhase";
+    inline constexpr const char* pitchLfoInvert   = "pitchLfoInvert";
+    inline constexpr const char* formantLfoTrig   = "formantLfoTrig";
+    inline constexpr const char* formantLfoFade   = "formantLfoFade";
+    inline constexpr const char* formantLfoPhase  = "formantLfoPhase";
+    inline constexpr const char* formantLfoInvert = "formantLfoInvert";
+    inline constexpr const char* grainLfoTrig     = "grainLfoTrig";
+    inline constexpr const char* grainLfoFade     = "grainLfoFade";
+    inline constexpr const char* grainLfoPhase    = "grainLfoPhase";
+    inline constexpr const char* grainLfoInvert   = "grainLfoInvert";
+
+    inline constexpr const char* envAttack  = "envAttack";
+    inline constexpr const char* envDecay   = "envDecay";
+    inline constexpr const char* envPitch   = "envPitch";
+    inline constexpr const char* envFormant = "envFormant";
+    inline constexpr const char* envGrain   = "envGrain";
+    inline constexpr const char* tapeStop   = "tapeStop";
+
+    inline constexpr const char* bendUp    = "bendUp";
+    inline constexpr const char* bendDown  = "bendDown";
+    inline constexpr const char* vibRate   = "vibRate";
+    inline constexpr const char* vibDepth  = "vibDepth";
+    inline constexpr const char* wheelDest = "wheelDest";
+    inline constexpr const char* wheelAmt  = "wheelAmt";
+    inline constexpr const char* touchDest = "touchDest";
+    inline constexpr const char* touchAmt  = "touchAmt";
+    inline constexpr const char* exprDest  = "exprDest";
+    inline constexpr const char* exprAmt   = "exprAmt";
+
     /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
     inline constexpr const char* bypass      = "bypass";
 
@@ -59,10 +91,16 @@ namespace grainlock::ParamID
         formantLfoOn, formantLfoRate, formantLfoSync, formantLfoShape, formantLfoDepth,
         grainLfoOn, grainLfoRate, grainLfoSync, grainLfoShape, grainLfoDepth,
         mix, dryWhenIdle, outGain,
-        formantTrack, autoGain
+        formantTrack, autoGain,
+        pitchLfoTrig, pitchLfoFade, pitchLfoPhase, pitchLfoInvert,
+        formantLfoTrig, formantLfoFade, formantLfoPhase, formantLfoInvert,
+        grainLfoTrig, grainLfoFade, grainLfoPhase, grainLfoInvert,
+        envAttack, envDecay, envPitch, envFormant, envGrain, tapeStop,
+        bendUp, bendDown, vibRate, vibDepth,
+        wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt
     };
 
-    /** The five parameter IDs of one LFO. */
+    /** The parameter IDs of one LFO. */
     struct LfoIds
     {
         const char* on;
@@ -70,20 +108,54 @@ namespace grainlock::ParamID
         const char* sync;
         const char* shape;
         const char* depth;
+        const char* trig;
+        const char* fade;
+        const char* phase;
+        const char* invert;
     };
 
     /** Indexed by LfoTarget: pitch, formant, grain cycles. */
     inline constexpr LfoIds lfo[] = {
-        { pitchLfoOn,   pitchLfoRate,   pitchLfoSync,   pitchLfoShape,   pitchLfoDepth },
-        { formantLfoOn, formantLfoRate, formantLfoSync, formantLfoShape, formantLfoDepth },
-        { grainLfoOn,   grainLfoRate,   grainLfoSync,   grainLfoShape,   grainLfoDepth },
+        { pitchLfoOn,   pitchLfoRate,   pitchLfoSync,   pitchLfoShape,   pitchLfoDepth,   pitchLfoTrig,   pitchLfoFade,   pitchLfoPhase,   pitchLfoInvert },
+        { formantLfoOn, formantLfoRate, formantLfoSync, formantLfoShape, formantLfoDepth, formantLfoTrig, formantLfoFade, formantLfoPhase, formantLfoInvert },
+        { grainLfoOn,   grainLfoRate,   grainLfoSync,   grainLfoShape,   grainLfoDepth,   grainLfoTrig,   grainLfoFade,   grainLfoPhase,   grainLfoInvert },
+    };
+
+    /** The destination and amount of one keyboard source. */
+    struct SourceIds
+    {
+        const char* dest;
+        const char* amount;
+    };
+
+    /** Indexed by ModSource: mod wheel, aftertouch, expression pedal. */
+    inline constexpr SourceIds source[] = {
+        { wheelDest, wheelAmt },
+        { touchDest, touchAmt },
+        { exprDest,  exprAmt },
     };
 }
 
 namespace grainlock
 {
     enum class CaptureMode { hold = 0, live = 1 };
-    enum class LfoShape    { sine = 0, triangle, square, sampleHold };
+    // A choice list's length is part of the host contract (automation stores index / (count - 1)).
+    // After the first release tag a list never changes length; a new option is a new parameter.
+    enum class LfoShape    { sine = 0, triangle, square, sampleHold, saw, random };
+    inline constexpr int numLfoShapes = 6;
+
+    /** Where an LFO's cycle starts. free: runs on (and locks to the song when synced). note: the shared
+        LFO restarts at every note. voice: each voice runs its own from its start. once: per voice,
+        one cycle, then it holds its last value. */
+    enum class LfoTrig     { free = 0, note, voice, once };
+    inline constexpr int numLfoTrigs = 4;
+
+    /** What a keyboard source moves. */
+    enum class ModDest     { off = 0, vibrato, formant, grain, level };
+    inline constexpr int numModDests = 5;
+
+    enum class ModSource   { wheel = 0, touch, expression };
+    inline constexpr int numModSources = 3;
 
     /** What each LFO moves. Also the index of that LFO everywhere (ParamID::lfo, EngineParams::lfos, ...). */
     enum class LfoTarget   { pitch = 0, formant, grainCycles };
@@ -97,8 +169,16 @@ namespace grainlock
     inline constexpr float lfoFormantRangeSemitones = 12.0f;
     inline constexpr float lfoCyclesRange           = 8.0f;
 
+    // Full-amount swing of a keyboard source per destination, and of the note envelope's tape stop.
+    inline constexpr float sourceFormantRangeSemitones = 12.0f;
+    inline constexpr float sourceCyclesRange           = 8.0f;
+    inline constexpr float tapeStopFallSemitones       = 48.0f;
+
     /** Choice labels for the LFO sync parameters. Index 0 is free-running (Hz); the rest are note divisions. */
     const juce::StringArray& lfoSyncChoices();
+
+    /** Choice labels for the LFO shape parameters, in LfoShape order: the one list every user shares. */
+    const juce::StringArray& lfoShapeChoices();
 
     /** Length of one LFO cycle in quarter-note beats for a sync index, or 0 for free-running. */
     double lfoSyncBeats (int syncIndex) noexcept;
@@ -147,8 +227,22 @@ namespace grainlock
             std::atomic<float>* sync;
             std::atomic<float>* shape;
             std::atomic<float>* depth;
+            std::atomic<float>* trig;
+            std::atomic<float>* fade;
+            std::atomic<float>* phase;
+            std::atomic<float>* invert;
         };
         std::array<Lfo, numLfos> lfo;
+
+        struct Source
+        {
+            std::atomic<float>* dest;
+            std::atomic<float>* amount;
+        };
+        std::array<Source, numModSources> source;
+
+        std::atomic<float> *envAttack, *envDecay, *envPitch, *envFormant, *envGrain, *tapeStop;
+        std::atomic<float> *bendUp, *bendDown, *vibRate, *vibDepth;
 
         std::atomic<float>* mix;
         std::atomic<float>* dryWhenIdle;

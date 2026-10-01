@@ -72,8 +72,12 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
         l.on           = asBool (refs.on, fallback.on);
         l.rateHz       = value (refs.rate, fallback.rateHz);
         l.sync         = asInt (refs.sync, fallback.sync);
-        l.shape        = (LfoShape) juce::jlimit (0, 3, asInt (refs.shape, (int) fallback.shape));
+        l.shape        = (LfoShape) juce::jlimit (0, numLfoShapes - 1, asInt (refs.shape, (int) fallback.shape));
         l.depthPercent = value (refs.depth, fallback.depthPercent);
+        l.trig         = (LfoTrig) juce::jlimit (0, numLfoTrigs - 1, asInt (refs.trig, (int) fallback.trig));
+        l.fadeMs       = value (refs.fade, fallback.fadeMs);
+        l.phaseDegrees = value (refs.phase, fallback.phaseDegrees);
+        l.invert       = asBool (refs.invert, fallback.invert);
     }
 
     p.mixPercent       = value (params.mix, d.mixPercent);
@@ -83,6 +87,23 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
 
     p.formantTrack     = asBool (params.formantTrack, d.formantTrack);
     p.autoGain         = asBool (params.autoGain, d.autoGain);
+
+    p.envAttackMs      = value (params.envAttack, d.envAttackMs);
+    p.envDecayMs       = value (params.envDecay, d.envDecayMs);
+    p.envPitch         = juce::jlimit (-24.0f, 24.0f, value (params.envPitch, d.envPitch));
+    p.envFormant       = juce::jlimit (-12.0f, 12.0f, value (params.envFormant, d.envFormant));
+    p.envGrain         = juce::jlimit (-15, 15, asInt (params.envGrain, d.envGrain));
+    p.tapeStop         = asBool (params.tapeStop, d.tapeStop);
+
+    p.bendUp           = juce::jlimit (0, 24, asInt (params.bendUp, d.bendUp));
+    p.bendDown         = juce::jlimit (0, 24, asInt (params.bendDown, d.bendDown));
+    p.vibRateHz        = juce::jlimit (0.1f, 12.0f, value (params.vibRate, d.vibRateHz));
+    p.vibDepthCents    = juce::jlimit (0.0f, 200.0f, value (params.vibDepth, d.vibDepthCents));
+    for (size_t i = 0; i < (size_t) numModSources; ++i)
+    {
+        p.sources[i].dest          = (ModDest) juce::jlimit (0, numModDests - 1, asInt (params.source[i].dest, (int) d.sources[i].dest));
+        p.sources[i].amountPercent = value (params.source[i].amount, d.sources[i].amountPercent);
+    }
     return p;
 }
 

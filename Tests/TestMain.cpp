@@ -1236,11 +1236,12 @@ namespace
             int wrong = 0;
             for (const char* id : ParamID::all)
             {
-                const bool ok = juce::String (id) == ParamID::autoGain ? plain (used, id) < 0.5f : atDefault (used, id);
+                const bool legacyOff = juce::String (id) == ParamID::autoGain || juce::String (id) == ParamID::wheelDest;
+                const bool ok = legacyOff ? plain (used, id) < 0.5f : atDefault (used, id);
                 wrong += ok ? 0 : 1;
             }
-            check (wrong == 0, fmt ("0.2 state onto a used instance: Auto Gain off, all %d others at their defaults (%d wrong)",
-                                    (int) std::size (ParamID::all) - 1, wrong));
+            check (wrong == 0, fmt ("0.2 state onto a used instance: Auto Gain off, mod wheel off, all %d others at their defaults (%d wrong)",
+                                    (int) std::size (ParamID::all) - 2, wrong));
         }
         {
             // Saved by the first 0.3 build: has Auto Gain (on) and Formant Track, nothing later.
@@ -1251,13 +1252,542 @@ namespace
             used.setStateInformation (block.getData(), (int) block.getSize());
             int wrong = 0;
             for (const char* id : ParamID::all)
-                wrong += atDefault (used, id) ? 0 : 1;
+                wrong += (juce::String (id) == ParamID::wheelDest ? plain (used, id) < 0.5f : atDefault (used, id)) ? 0 : 1;
             check (wrong == 0 && plain (used, ParamID::autoGain) >= 0.5f,
-                   fmt ("a state that saved Auto Gain on keeps it on; everything else at its default (%d wrong)", wrong));
+                   fmt ("a state that saved Auto Gain on keeps it on; everything it did not save gets its older value (%d wrong)", wrong));
         }
         {
             GrainLockProcessor fresh;
             check (plain (fresh, ParamID::autoGain) >= 0.5f, "a new instance starts with Auto Gain on");
+        }
+    }
+
+    //==========================================================================
+    // 0.3 stage 2: LFO trigger modes, note envelope, tape stop, keyboard sources
+
+    struct ScriptEvent
+    {
+        juce::int64 time;
+        juce::uint8 bytes[3];
+        int size;
+    };
+
+    ScriptEvent keyDown (juce::int64 t, int note, int velocity = 127) { return { t, { 0x90, (juce::uint8) note, (juce::uint8) velocity }, 3 }; }
+    ScriptEvent keyUp (juce::int64 t, int note)                       { return { t, { 0x80, (juce::uint8) note, 0 }, 3 }; }
+    ScriptEvent controller (juce::int64 t, int number, int value)     { return { t, { 0xb0, (juce::uint8) number, (juce::uint8) value }, 3 }; }
+    ScriptEvent bendTo (juce::int64 t, int value14)                   { return { t, { 0xe0, (juce::uint8) (value14 & 0x7f), (juce::uint8) ((value14 >> 7) & 0x7f) }, 3 }; }
+    ScriptEvent channelPressure (juce::int64 t, int value)            { return { t, { 0xd0, (juce::uint8) value, 0 }, 2 }; }
+    ScriptEvent polyPressure (juce::int64 t, int note, int value)     { return { t, { 0xa0, (juce::uint8) note, (juce::uint8) value }, 3 }; }
+
+    /** Plays input (both channels) through h with the events. startPpq >= 0 adds a running transport
+        at bpm whose position is worked out from the sample count. Returns the left output. */
+    std::vector<float> play (Harness& h, const std::vector<float>& input, const std::vector<ScriptEvent>& events,
+                             double startPpq = -1.0, double bpm = 120.0)
+    {
+        FakePlayHead playHead;
+        playHead.bpm = bpm;
+        if (startPpq >= 0.0)
+            h.proc.setPlayHead (&playHead);
+
+        juce::AudioBuffer<float> buffer (2, h.blockSize);
+        juce::MidiBuffer midi;
+        midi.ensureSize (4096);
+        std::vector<float> out (input.size());
+        size_t next = 0;
+
+        for (size_t pos = 0; pos < input.size(); pos += (size_t) h.blockSize)
+        {
+            const int n = (int) std::min<size_t> ((size_t) h.blockSize, input.size() - pos);
+            buffer.setSize (2, n, false, false, true);
+            for (int i = 0; i < n; ++i)
+            {
+                buffer.setSample (0, i, input[pos + (size_t) i]);
+                buffer.setSample (1, i, input[pos + (size_t) i]);
+            }
+
+            midi.clear();
+            while (next < events.size() && events[next].time < (juce::int64) (pos + (size_t) n))
+            {
+                midi.addEvent (events[next].bytes, events[next].size, (int) std::max<juce::int64> (0, events[next].time - (juce::int64) pos));
+                ++next;
+            }
+
+            playHead.ppq = std::max (0.0, startPpq) + (double) pos * bpm / 60.0 / h.rate;
+            h.proc.processBlock (buffer, midi);
+            for (int i = 0; i < n; ++i)
+                out[pos + (size_t) i] = buffer.getSample (0, i);
+        }
+
+        h.proc.setPlayHead (nullptr);
+        return out;
+    }
+
+    std::vector<float> noiseInput (size_t length, int seed, float amplitude)
+    {
+        juce::Random rng (seed);
+        std::vector<float> x (length);
+        for (auto& v : x)
+            v = (rng.nextFloat() * 2.0f - 1.0f) * amplitude;
+        return x;
+    }
+
+    /** Noise with one resonance at 1 kHz: a tone colour whose position can be measured. */
+    std::vector<float> resonantNoise (size_t length)
+    {
+        std::vector<float> x (length);
+        juce::Random rng (31);
+        const double w = juce::MathConstants<double>::twoPi * 1000.0 / 48000.0, r = 0.985;
+        double y1 = 0.0, y2 = 0.0;
+        for (auto& v : x)
+        {
+            const double in = rng.nextDouble() * 2.0 - 1.0;
+            const double y = in + 2.0 * r * std::cos (w) * y1 - r * r * y2;
+            y2 = y1;
+            y1 = y;
+            v = (float) (0.004 * y);
+        }
+        return x;
+    }
+
+    std::vector<float> harmonicInput (size_t length, double hz, int harmonics, double amplitude)
+    {
+        std::vector<float> x (length);
+        for (size_t i = 0; i < length; ++i)
+        {
+            double s = 0.0;
+            for (int k = 1; k <= harmonics; ++k)
+                s += std::sin (juce::MathConstants<double>::twoPi * hz * k * (double) i / 48000.0 + 0.7 * k) / k;
+            x[i] = (float) (amplitude * s);
+        }
+        return x;
+    }
+
+    std::vector<float> slice (const std::vector<float>& x, size_t from, size_t length)
+    {
+        return std::vector<float> (x.begin() + (std::ptrdiff_t) from, x.begin() + (std::ptrdiff_t) (from + length));
+    }
+
+    /** Pitch of 2^order samples starting at from. */
+    double pitchAt (const std::vector<float>& x, size_t from, int order = 13)
+    {
+        return fftFundamentalHz (slice (x, from, (size_t) 1 << order), 48000.0, order);
+    }
+
+    /** Pitch of a short stretch by autocorrelation: for sounds whose pitch is moving. */
+    double shortPitchHz (const std::vector<float>& x, size_t from, int length, double minHz, double maxHz)
+    {
+        const int minLag = (int) (48000.0 / maxHz), maxLag = (int) (48000.0 / minHz);
+        double best = -2.0;
+        int bestLag = 0;
+        for (int lag = minLag; lag <= maxLag; ++lag)
+        {
+            double xy = 0.0, xx = 0.0, yy = 0.0;
+            for (int i = 0; i < length; ++i)
+            {
+                const double a = x[from + (size_t) i], b = x[from + (size_t) (i + lag)];
+                xy += a * b; xx += a * a; yy += b * b;
+            }
+            const double r = xy / std::sqrt (std::max (1.0e-30, xx * yy));
+            if (r > best + 0.02) { best = r; bestLag = lag; }   // the shortest of near-equal peaks
+        }
+        return bestLag > 0 ? 48000.0 / bestLag : 0.0;
+    }
+
+    /** Energy of the note's harmonics near 2 kHz against those near 1 kHz, in dB, over the last 2^order samples. */
+    double toneBalanceDb (const std::vector<float>& x, double f0, int order = 15)
+    {
+        double low = 0.0, high = 0.0;
+        for (int k = 1; k * f0 < 3000.0; ++k)
+        {
+            const double f = k * f0, p = std::pow (10.0, lineLevelDb (x, 48000.0, f, order) / 10.0);
+            if (f > 750.0 && f < 1300.0)  low += p;
+            if (f > 1500.0 && f < 2600.0) high += p;
+        }
+        return 10.0 * std::log10 (std::max (1.0e-20, high) / std::max (1.0e-20, low));
+    }
+
+    void testParameterGuards()
+    {
+        section ("0.3 guard rails: lists, names and typed values");
+
+        check (lfoShapeChoices().size() == numLfoShapes, fmt ("%d LFO shapes in the one shared list (expected %d)", lfoShapeChoices().size(), numLfoShapes));
+
+        // Every shape draws something different (a shape missing from the oscillator would repeat another).
+        {
+            std::array<std::array<float, 64>, (size_t) numLfoShapes> curves {};
+            for (int s = 0; s < numLfoShapes; ++s)
+            {
+                Lfo lfo;
+                lfo.reset (7);
+                for (auto& v : curves[(size_t) s])
+                    v = lfo.next (1.0 / 64.0, (LfoShape) s);
+            }
+            int alike = 0;
+            for (int a = 0; a < numLfoShapes; ++a)
+                for (int b = a + 1; b < numLfoShapes; ++b)
+                {
+                    float difference = 0.0f;
+                    for (size_t i = 0; i < 64; ++i)
+                        difference += std::abs (curves[(size_t) a][i] - curves[(size_t) b][i]);
+                    alike += difference < 1.0f ? 1 : 0;
+                }
+            check (alike == 0, fmt ("all %d shapes differ from each other (%d pairs alike)", numLfoShapes, alike));
+        }
+
+        GrainLockProcessor p;
+
+        // The length of a choice list is fixed once released (automation stores index / (count - 1)).
+        {
+            const std::pair<const char*, int> lists[] = {
+                { ParamID::captureMode, 2 },
+                { ParamID::pitchLfoSync, 13 }, { ParamID::formantLfoSync, 13 }, { ParamID::grainLfoSync, 13 },
+                { ParamID::pitchLfoShape, 6 }, { ParamID::formantLfoShape, 6 }, { ParamID::grainLfoShape, 6 },
+                { ParamID::pitchLfoTrig, 4 }, { ParamID::formantLfoTrig, 4 }, { ParamID::grainLfoTrig, 4 },
+                { ParamID::wheelDest, 5 }, { ParamID::touchDest, 5 }, { ParamID::exprDest, 5 },
+            };
+            int wrong = 0, choices = 0;
+            for (const auto& [id, count] : lists)
+            {
+                auto* choice = dynamic_cast<juce::AudioParameterChoice*> (p.apvts.getParameter (id));
+                wrong += (choice != nullptr && choice->choices.size() == count) ? 0 : 1;
+            }
+            for (const char* id : ParamID::all)
+                choices += dynamic_cast<juce::AudioParameterChoice*> (p.apvts.getParameter (id)) != nullptr ? 1 : 0;
+            check (wrong == 0 && choices == (int) std::size (lists),
+                   fmt ("%d choice lists, each with its recorded length (%d wrong, %d lists found)", (int) std::size (lists), wrong, choices));
+        }
+
+        {
+            juce::StringArray names;
+            for (const char* id : ParamID::all)
+                names.addIfNotAlreadyThere (p.apvts.getParameter (id)->getName (64));
+            check (names.size() == (int) std::size (ParamID::all), fmt ("%d parameters, %d distinct names", (int) std::size (ParamID::all), names.size()));
+        }
+
+        // What a parameter shows must be something it can read back (typing into a host's value field).
+        {
+            int wrong = 0;
+            juce::String firstWrong;
+            for (const char* id : ParamID::all)
+            {
+                auto* param = p.apvts.getParameter (id);
+                for (const float v : { 0.0f, param->getDefaultValue(), 1.0f })
+                {
+                    const auto text = param->getText (v, 64);
+                    const float back = param->getValueForText (text);
+                    // one displayed digit of slack: the text is rounded for reading
+                    const float shownAgain = param->getValueForText (param->getText (back, 64));
+                    if (std::abs (back - v) > 0.02f || std::abs (shownAgain - back) > 1.0e-4f)
+                    {
+                        if (wrong++ == 0)
+                            firstWrong = juce::String (id) + " shows '" + text + "' for " + juce::String (v, 3) + ", reads it as " + juce::String (back, 3);
+                    }
+                }
+            }
+            check (wrong == 0, wrong == 0 ? juce::String ("every parameter reads back the text it shows, at minimum, default and maximum")
+                                          : fmt ("%d values do not read back; first: %s", wrong, firstWrong.toRawUTF8()));
+        }
+    }
+
+    void testLfoTriggerModes()
+    {
+        section ("0.3 G11: Free follows the song, Note and Voice start at the key, and a restarted S&H repeats itself");
+
+        // Pitch LFO: square, synced to 1/4, full depth (+/-100 cents). The transport is half a cycle in
+        // when the key lands, where a song-locked square reads -100 cents and a restarted one +100.
+        const auto input = noiseInput (72000, 3, 0.25f);
+        auto centsAfterKey = [&input] (LfoTrig trig, int block)
+        {
+            Harness h (48000.0, block);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::pitchLfoOn, 1.0f);
+            h.set (ParamID::pitchLfoShape, (float) (int) LfoShape::square);
+            h.set (ParamID::pitchLfoSync, 5.0f);   // 1/4
+            h.set (ParamID::pitchLfoDepth, 100.0f);
+            h.set (ParamID::pitchLfoTrig, (float) (int) trig);
+            const auto out = play (h, input, { keyDown (24037, 69) }, 0.5, 120.0);
+            return centsBetween (pitchAt (out, 24037 + 800), 440.0);
+        };
+
+        double worstFree = 0.0, worstNote = 0.0, worstVoice = 0.0;
+        for (const int block : { 64, 4096 })
+        {
+            worstFree = std::max (worstFree, std::abs (centsAfterKey (LfoTrig::free, block) + 100.0));
+            worstNote = std::max (worstNote, std::abs (centsAfterKey (LfoTrig::note, block) - 100.0));
+            worstVoice = std::max (worstVoice, std::abs (centsAfterKey (LfoTrig::voice, block) - 100.0));
+        }
+        check (worstFree <= 10.0, fmt ("Free, synced: the note starts at -100 cents with the song (off by %.1f at most, blocks of 64 and 4096)", worstFree));
+        check (worstNote <= 10.0 && worstVoice <= 10.0,
+               fmt ("Note and Voice, synced: the note starts at +100 cents, the top of its own cycle (off by %.1f and %.1f)", worstNote, worstVoice));
+
+        // S&H at 1/16 on pitch: two keys at unrelated song positions. Restarted, both hear the same
+        // first three steps; free-running, they hear whatever the song position gives.
+        const auto longInput = noiseInput (192000, 4, 0.25f);
+        auto stepDifference = [&longInput] (LfoTrig trig)
+        {
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::pitchLfoOn, 1.0f);
+            h.set (ParamID::pitchLfoShape, (float) (int) LfoShape::sampleHold);
+            h.set (ParamID::pitchLfoSync, 9.0f);   // 1/16: 6000 samples at 120 BPM
+            h.set (ParamID::pitchLfoDepth, 100.0f);
+            h.set (ParamID::pitchLfoTrig, (float) (int) trig);
+            h.set (ParamID::release, 5.0f);
+            const juce::int64 first = 24000, second = 24000 + 96000 + 1777;
+            const auto out = play (h, longInput, { keyDown (first, 69), keyUp (first + 20000, 69), keyDown (second, 69) }, 0.37, 120.0);
+            double worst = 0.0;
+            for (int step = 0; step < 3; ++step)
+            {
+                const double a = pitchAt (out, (size_t) (first + step * 6000 + 900), 12);
+                const double b = pitchAt (out, (size_t) (second + step * 6000 + 900), 12);
+                worst = std::max (worst, std::abs (centsBetween (a, b)));
+            }
+            return worst;
+        };
+        const double restarted = stepDifference (LfoTrig::note), running = stepDifference (LfoTrig::free);
+        check (restarted <= 12.0 && running > 12.0,
+               fmt ("S&H: with Note the two keys' first three steps agree within %.1f cents; with Free they differ by up to %.1f", restarted, running));
+
+        // Once: one cycle, then the last value is held. A square ends its cycle at the bottom, and stays there.
+        {
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::pitchLfoOn, 1.0f);
+            h.set (ParamID::pitchLfoShape, (float) (int) LfoShape::square);
+            h.set (ParamID::pitchLfoRate, 4.0f);   // one cycle = 12000 samples: +100 for 6000, -100 for 6000
+            h.set (ParamID::pitchLfoDepth, 100.0f);
+            h.set (ParamID::pitchLfoTrig, (float) (int) LfoTrig::once);
+            const auto out = play (h, input, { keyDown (12000, 69) });
+            const double early = centsBetween (pitchAt (out, 12000 + 600, 12), 440.0);
+            const double later = centsBetween (pitchAt (out, 12000 + 6000 + 600, 12), 440.0);
+            const double held = centsBetween (pitchAt (out, 12000 + 30000), 440.0);
+            check (std::abs (early - 100.0) <= 12.0 && std::abs (later + 100.0) <= 12.0 && std::abs (held + 100.0) <= 6.0,
+                   fmt ("Once, square: %+.0f cents, then %+.0f, then held at %+.0f after its one cycle", early, later, held));
+        }
+
+        // Fade: the LFO comes in over the fade time, per note.
+        {
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::pitchLfoOn, 1.0f);
+            h.set (ParamID::pitchLfoShape, (float) (int) LfoShape::square);
+            h.set (ParamID::pitchLfoRate, 0.25f);   // +100 cents for the first two seconds
+            h.set (ParamID::pitchLfoDepth, 100.0f);
+            h.set (ParamID::pitchLfoTrig, (float) (int) LfoTrig::note);
+            h.set (ParamID::pitchLfoFade, 1000.0f);
+            const auto out = play (h, noiseInput (96000, 6, 0.25f), { keyDown (12000, 69) });
+            const double start = centsBetween (pitchAt (out, 12000 + 300, 12), 440.0);
+            const double half = centsBetween (pitchAt (out, 12000 + 24000 - 2048, 12), 440.0);
+            const double full = centsBetween (pitchAt (out, 12000 + 60000), 440.0);
+            check (start < 15.0 && std::abs (half - 50.0) <= 12.0 && std::abs (full - 100.0) <= 6.0,
+                   fmt ("Fade 1 s: %+.0f cents at the start, %+.0f half-way, %+.0f once it is in", start, half, full));
+        }
+    }
+
+    void testNoteEnvelope()
+    {
+        section ("0.3 G10: the note envelope bends pitch, formant and grain per note; tape stop slows a released note to a halt");
+
+        {
+            // Pitch +12 with a slow decay: the note starts an octave up.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::envPitch, 12.0f);
+            h.set (ParamID::envDecay, 5000.0f);
+            const auto out = play (h, noiseInput (48000, 8, 0.25f), { keyDown (12000, 57) });
+            const double cents = centsBetween (pitchAt (out, 12000 + 300, 12), 220.0);
+            check (cents > 1120.0 && cents <= 1205.0, fmt ("Env Pitch +12, slow decay: the note starts %+.0f cents up", cents));
+        }
+        {
+            // Pitch +24 with a short decay: once it has passed, the note must be the same note with the
+            // same tone as without the envelope (the grab is sized for the note, not for the dive).
+            const auto input = resonantNoise (96000);
+            auto settled = [&input] (float envPitch)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::grainCycles, 4.0f);
+                h.set (ParamID::envPitch, envPitch);
+                h.set (ParamID::envDecay, 100.0f);
+                return play (h, input, { keyDown (48000, 60) });
+            };
+            const auto with = settled (24.0f), without = settled (0.0f);
+            const double f0 = noteHz (60);
+            double worst = 0.0;
+            for (int k = 1; k <= 6; ++k)
+                worst = std::max (worst, std::abs (lineLevelDb (with, 48000.0, f0 * k) - lineLevelDb (without, 48000.0, f0 * k)));
+            check (worst <= 1.0, fmt ("Env Pitch +24, 100 ms decay: afterwards the first six harmonics are within %.2f dB of the plain note", worst));
+        }
+        {
+            // Grain +8 in Live at Grain 2 must be audible from the first grab: ten alike cycles add up to
+            // about 7 dB more than two (Auto Gain off so the level shows it).
+            const auto input = harmonicInput (96000, 220.0, 8, 0.03);
+            auto level = [&input] (float envGrain)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::autoGain, 0.0f);
+                h.set (ParamID::envGrain, envGrain);
+                h.set (ParamID::envDecay, 5000.0f);
+                const auto out = play (h, input, { keyDown (48000, 57) });
+                return rmsDb (out, 52000, 62000);
+            };
+            const double rise = level (8.0f) - level (0.0f);
+            check (rise >= 5.0, fmt ("Env Grain +8 over Grain 2 in Live: %.1f dB louder on a source at the note's pitch (ten cycles against two: about 7)", rise));
+        }
+        {
+            // Formant +12 in Live: the first grab already reads an octave up.
+            const auto input = resonantNoise (96000);
+            auto balance = [&input] (float envFormant)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::grainCycles, 4.0f);
+                h.set (ParamID::refresh, 500.0f);
+                h.set (ParamID::envFormant, envFormant);
+                h.set (ParamID::envDecay, 5000.0f);
+                const auto out = play (h, input, { keyDown (48000, 60) });
+                return toneBalanceDb (slice (out, 48000 + 600, 8192), noteHz (60), 13);
+            };
+            const double up = balance (12.0f), plain = balance (0.0f);
+            check (plain < -6.0 && up > 6.0, fmt ("Env Formant +12 in Live: energy at 2 kHz against 1 kHz is %+.1f dB at the start (%+.1f without)", up, plain));
+        }
+        {
+            // Tape stop in Live with a 5 s release, the input cut at key-up. Half-way through the
+            // release the note is two octaves down, and still sounding: it kept its grain instead of
+            // grabbing the silence. Without tape stop the same release grabs silence.
+            auto input = noiseInput (192000, 9, 0.25f);
+            for (size_t i = 48000; i < input.size(); ++i)
+                input[i] = 0.0f;
+            auto run = [&input] (bool tapeStop)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::release, 5000.0f);
+                h.set (ParamID::tapeStop, tapeStop ? 1.0f : 0.0f);
+                return play (h, input, { keyDown (24000, 69), keyUp (48000, 69) });
+            };
+            const auto stopping = run (true), plain = run (false);
+            const size_t half = 48000 + 120000;
+            const double level = rmsDb (stopping, half - 2400, half + 2400), plainLevel = rmsDb (plain, half - 2400, half + 2400);
+            const double cents = centsBetween (shortPitchHz (stopping, half - 1024, 2048, 60.0, 400.0), 110.0);
+            check (level - plainLevel >= 20.0 && std::abs (cents) <= 150.0,
+                   fmt ("Tape stop, half-way through a 5 s release: %+.0f cents from two octaves down, %.0f dB above the same release without it", cents, level - plainLevel));
+        }
+    }
+
+    void testKeyboardSources()
+    {
+        section ("0.3 G05: bend range, mod wheel, aftertouch and expression pedal");
+
+        const auto input = noiseInput (96000, 12, 0.25f);
+
+        {
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::bendUp, 12.0f);
+            h.set (ParamID::bendDown, 5.0f);
+            const auto out = play (h, input, { keyDown (12000, 57), bendTo (30000, 16383), bendTo (60000, 0) });
+            const double up = centsBetween (pitchAt (out, 40000), 220.0), down = centsBetween (pitchAt (out, 96000 - 16384, 14), 220.0);
+            check (std::abs (up - 1200.0) <= 10.0 && std::abs (down + 500.0) <= 10.0,
+                   fmt ("Bend Up 12, Bend Down 5: the wheel reaches %+.0f and %+.0f cents", up, down));
+        }
+        {
+            // The default: the wheel brings in a vibrato of +/-50 cents.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            const auto out = play (h, input, { keyDown (12000, 69), controller (24000, 1, 127) });
+            double lo = 1.0e9, hi = -1.0e9;
+            for (size_t at = 36000; at + 4096 < 84000; at += 1024)
+            {
+                const double c = centsBetween (shortPitchHz (out, at, 2048, 380.0, 500.0), 440.0);
+                lo = std::min (lo, c);
+                hi = std::max (hi, c);
+            }
+            const double still = centsBetween (pitchAt (out, 12000 + 600, 13), 440.0);
+            check (std::abs (still) <= 5.0 && hi - lo >= 45.0 && hi - lo <= 150.0,
+                   fmt ("mod wheel: steady before it (%+.1f cents), then a vibrato from %+.0f to %+.0f cents", still, lo, hi));
+        }
+        {
+            // Level: the wheel fades the note out; "reset controllers" brings it back.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::wheelDest, (float) (int) ModDest::level);
+            const auto out = play (h, input, { keyDown (12000, 57), controller (36000, 1, 127), controller (60000, 121, 0) });
+            const double before = rmsDb (out, 24000, 36000), faded = rmsDb (out, 48000, 60000), back = rmsDb (out, 72000, 96000);
+            check (before - faded >= 40.0 && std::abs (back - before) <= 1.0,
+                   fmt ("wheel to Level: down %.0f dB at full wheel, back within %.2f dB after a controller reset", before - faded, back - before));
+        }
+        {
+            // Channel pressure is a two-byte message; here it is the only (so the last) event in its block.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::touchDest, (float) (int) ModDest::level);
+            const auto out = play (h, input, { keyDown (12000, 57), channelPressure (36000, 127) });
+            const double drop = rmsDb (out, 24000, 36000) - rmsDb (out, 60000, 96000);
+            check (drop >= 40.0, fmt ("channel pressure (2 bytes) to Level: down %.0f dB", drop));
+        }
+        {
+            // Poly pressure reaches only its own key's voice.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::touchDest, (float) (int) ModDest::level);
+            const auto pressed = play (h, input, { keyDown (12000, 57), keyDown (12000, 64), polyPressure (36000, 64, 127) });
+            Harness plainHarness (48000.0, 256);
+            plainHarness.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            const auto plain = play (plainHarness, input, { keyDown (12000, 57), keyDown (12000, 64) });
+            const double low = lineLevelDb (pressed, 48000.0, noteHz (57)) - lineLevelDb (plain, 48000.0, noteHz (57));
+            const double high = lineLevelDb (pressed, 48000.0, noteHz (64)) - lineLevelDb (plain, 48000.0, noteHz (64));
+            check (std::abs (low) <= 1.0 && high <= -30.0,
+                   fmt ("poly pressure on E3 to Level: A2 changes by %+.2f dB, E3 by %+.0f dB", low, high));
+        }
+        {
+            // The expression pedal rests at full; pulled back it moves its destination.
+            const auto tone = resonantNoise (96000);
+            auto balance = [&tone] (int pedal)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::grainCycles, 4.0f);
+                h.set (ParamID::exprDest, (float) (int) ModDest::formant);
+                const auto out = play (h, tone, { keyDown (24000, 60), controller (36000, 11, pedal) });
+                return toneBalanceDb (out, noteHz (60));
+            };
+            const double rest = balance (127), back = balance (0);
+            check (rest < -6.0 && back > 6.0,
+                   fmt ("pedal to Formant: 2 kHz against 1 kHz is %+.1f dB with the pedal at rest and %+.1f dB pulled back (an octave up)", rest, back));
+        }
+        {
+            // A 0.2 project never reacted to the mod wheel, and must not start to.
+            auto render = [&input] (bool withWheel)
+            {
+                GrainLockProcessor source;
+                auto xml = source.apvts.copyState().createXml();
+                juce::Array<juce::XmlElement*> drop;
+                bool past = false;
+                for (const char* id : ParamID::all)
+                {
+                    if (past)
+                        for (auto* node : xml->getChildWithTagNameIterator ("PARAM"))
+                            if (node->getStringAttribute ("id") == id)
+                                drop.add (node);
+                    if (juce::String (id) == ParamID::outGain) past = true;
+                }
+                for (auto* node : drop)
+                    xml->removeChildElement (node, true);
+                juce::MemoryBlock block;
+                juce::AudioProcessor::copyXmlToBinary (*xml, block);
+
+                Harness h (48000.0, 256);
+                h.proc.setStateInformation (block.getData(), (int) block.getSize());
+                std::vector<ScriptEvent> events { keyDown (12000, 57) };
+                if (withWheel)
+                    for (int k = 0; k < 20; ++k)
+                        events.push_back (controller (20000 + k * 3000, 1, (k * 37) % 128));
+                return play (h, input, events);
+            };
+            const auto wheel = render (true), still = render (false);
+            float difference = 0.0f;
+            for (size_t i = 0; i < still.size(); ++i)
+                difference = std::max (difference, std::abs (wheel[i] - still[i]));
+            check (juce::exactlyEqual (difference, 0.0f), fmt ("a 0.2 project with the mod wheel moving: identical to the same notes without it (max difference %g)", (double) difference));
         }
     }
 
@@ -1730,6 +2260,13 @@ int main (int argc, char** argv)
         testAutoGain();
         testFormantTrack();
         testOlderStates();
+    }
+    if (wants ("v03b"))
+    {
+        testParameterGuards();
+        testLfoTriggerModes();
+        testNoteEnvelope();
+        testKeyboardSources();
     }
     if (wants ("reference"))
     {

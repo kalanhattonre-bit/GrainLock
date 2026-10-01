@@ -38,6 +38,21 @@ namespace grainlock
 
         float parseNumber (const juce::String& text) { return text.trim().getFloatValue(); }
 
+        /** For whole-number parameters: getIntValue stops at a leading '+', so "+3 st" would read as 0. */
+        int parseWhole (const juce::String& text, int) { return juce::roundToInt (text.trim().getFloatValue()); }
+
+        juce::String formatDegrees (float v, int)    { return juce::String (juce::roundToInt (v)) + " deg"; }
+        juce::String formatSemitonesWhole (int v, int) { return signedString ((float) v, 0) + " st"; }
+
+        auto intParam (const char* id, const char* name, int lo, int hi, int def, std::function<juce::String (int, int)> toText)
+        {
+            return std::make_unique<juce::AudioParameterInt> (
+                juce::ParameterID { id, 1 }, name, lo, hi, def,
+                juce::AudioParameterIntAttributes()
+                    .withStringFromValueFunction (std::move (toText))
+                    .withValueFromStringFunction ([] (const juce::String& text) { return parseWhole (text, 0); }));
+        }
+
         Range skewedRange (float lo, float hi, float step, float centre)
         {
             Range r (lo, hi, step);
@@ -77,6 +92,12 @@ namespace grainlock
         return choices;
     }
 
+    const juce::StringArray& lfoShapeChoices()
+    {
+        static const juce::StringArray choices { "Sine", "Triangle", "Square", "S&H", "Saw", "Random" };
+        return choices;
+    }
+
     double lfoSyncBeats (int syncIndex) noexcept
     {
         // Quarter-note beats per LFO cycle; triplets are two thirds of the straight value.
@@ -110,10 +131,7 @@ namespace grainlock
 
         // VOICE
         layout.add (floatParam (ParamID::formant, "Formant", Range (-12.0f, 12.0f, 0.01f), 0.0f, formatSemitones));
-        layout.add (std::make_unique<juce::AudioParameterInt> (
-            juce::ParameterID { ParamID::tune, 1 }, "Tune", -24, 24, 0,
-            juce::AudioParameterIntAttributes().withStringFromValueFunction (
-                [] (int v, int) { return signedString ((float) v, 0) + " st"; })));
+        layout.add (intParam (ParamID::tune, "Tune", -24, 24, 0, formatSemitonesWhole));
         layout.add (floatParam (ParamID::fine, "Fine", Range (-100.0f, 100.0f, 0.1f), 0.0f, formatCents));
         layout.add (floatParam (ParamID::glide, "Glide", skewedRange (0.0f, 2000.0f, 0.1f, 200.0f), 0.0f, formatMs, parseMs));
         layout.add (boolParam (ParamID::mono, "Mono", false));
@@ -134,7 +152,7 @@ namespace grainlock
             layout.add (boolParam (ids.on, (name + " On").toRawUTF8(), false));
             layout.add (floatParam (ids.rate, (name + " Rate").toRawUTF8(), skewedRange (0.01f, 30.0f, 0.001f, 2.0f), 1.0f, formatHz));
             layout.add (choiceParam (ids.sync, (name + " Sync").toRawUTF8(), lfoSyncChoices(), 0));
-            layout.add (choiceParam (ids.shape, (name + " Shape").toRawUTF8(), { "Sine", "Triangle", "Square", "S&H" }, (int) LfoShape::sine));
+            layout.add (choiceParam (ids.shape, (name + " Shape").toRawUTF8(), lfoShapeChoices(), (int) LfoShape::sine));
             layout.add (floatParam (ids.depth, (name + " Depth").toRawUTF8(), Range (0.0f, 100.0f, 0.1f), 50.0f, formatPercent));
         }
 
@@ -147,6 +165,45 @@ namespace grainlock
         // for new work and switched off when an older project is loaded (migratePre03State).
         layout.add (boolParam (ParamID::formantTrack, "Formant Track", false));
         layout.add (boolParam (ParamID::autoGain, "Auto Gain", true));
+
+        // How each LFO starts. Free with no fade, no offset and not inverted is 0.2's LFO.
+        for (int i = 0; i < numLfos; ++i)
+        {
+            const auto& ids = ParamID::lfo[i];
+            const juce::String name (lfoNames[i]);
+            layout.add (choiceParam (ids.trig, (name + " Trigger").toRawUTF8(), { "Free", "Note", "Voice", "Once" }, (int) LfoTrig::free));
+            layout.add (floatParam (ids.fade, (name + " Fade").toRawUTF8(), skewedRange (0.0f, 5000.0f, 0.1f, 500.0f), 0.0f, formatMs, parseMs));
+            layout.add (floatParam (ids.phase, (name + " Phase").toRawUTF8(), Range (0.0f, 360.0f, 1.0f), 0.0f, formatDegrees));
+            layout.add (boolParam (ids.invert, (name + " Invert").toRawUTF8(), false));
+        }
+
+        // NOTE ENVELOPE: a second envelope per note (rises over Attack, falls back over Decay) that
+        // bends pitch, formant and grain by these amounts. All amounts 0 = nothing.
+        layout.add (floatParam (ParamID::envAttack, "Note Env Attack", skewedRange (0.0f, 2000.0f, 0.1f, 100.0f), 0.0f, formatMs, parseMs));
+        layout.add (floatParam (ParamID::envDecay, "Note Env Decay", skewedRange (1.0f, 5000.0f, 0.1f, 300.0f), 300.0f, formatMs, parseMs));
+        layout.add (floatParam (ParamID::envPitch, "Note Env Pitch", Range (-24.0f, 24.0f, 0.01f), 0.0f, formatSemitones));
+        layout.add (floatParam (ParamID::envFormant, "Note Env Formant", Range (-12.0f, 12.0f, 0.01f), 0.0f, formatSemitones));
+        layout.add (intParam (ParamID::envGrain, "Note Env Grain", -15, 15, 0,
+                              [] (int v, int) { return signedString ((float) v, 0) + (std::abs (v) == 1 ? " cycle" : " cycles"); }));
+        layout.add (boolParam (ParamID::tapeStop, "Tape Stop", false));
+
+        // KEYBOARD: bend range, and what the mod wheel, aftertouch and the expression pedal move.
+        layout.add (intParam (ParamID::bendUp, "Bend Up", 0, 24, 2, [] (int v, int) { return juce::String (v) + " st"; }));
+        layout.add (intParam (ParamID::bendDown, "Bend Down", 0, 24, 2, [] (int v, int) { return juce::String (v) + " st"; }));
+        layout.add (floatParam (ParamID::vibRate, "Vibrato Rate", skewedRange (0.1f, 12.0f, 0.01f, 5.0f), 5.5f, formatHz));
+        layout.add (floatParam (ParamID::vibDepth, "Vibrato Depth", Range (0.0f, 200.0f, 1.0f), 50.0f,
+                                [] (float v, int) { return juce::String (juce::roundToInt (v)) + " ct"; }));
+
+        const juce::StringArray destinations { "Off", "Vibrato", "Formant", "Grain", "Level" };
+        const char* sourceNames[] = { "Wheel", "Aftertouch", "Pedal" };
+        const int sourceDefaults[] = { (int) ModDest::vibrato, (int) ModDest::off, (int) ModDest::off };
+        for (int i = 0; i < numModSources; ++i)
+        {
+            const juce::String name (sourceNames[i]);
+            layout.add (choiceParam (ParamID::source[i].dest, (name + " Destination").toRawUTF8(), destinations, sourceDefaults[i]));
+            layout.add (floatParam (ParamID::source[i].amount, (name + " Amount").toRawUTF8(), Range (-100.0f, 100.0f, 1.0f), 100.0f,
+                                    [] (float v, int) { return signedString ((float) juce::roundToInt (v), 0) + "%"; }));
+        }
 
         // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
         layout.add (boolParam (ParamID::bypass, "Bypass", false));
@@ -182,8 +239,22 @@ namespace grainlock
         for (int i = 0; i < numLfos; ++i)
         {
             const auto& ids = ParamID::lfo[i];
-            lfo[(size_t) i] = Lfo { get (ids.on), get (ids.rate), get (ids.sync), get (ids.shape), get (ids.depth) };
+            lfo[(size_t) i] = Lfo { get (ids.on), get (ids.rate), get (ids.sync), get (ids.shape), get (ids.depth),
+                                    get (ids.trig), get (ids.fade), get (ids.phase), get (ids.invert) };
         }
+        for (int i = 0; i < numModSources; ++i)
+            source[(size_t) i] = Source { get (ParamID::source[i].dest), get (ParamID::source[i].amount) };
+
+        envAttack  = get (ParamID::envAttack);
+        envDecay   = get (ParamID::envDecay);
+        envPitch   = get (ParamID::envPitch);
+        envFormant = get (ParamID::envFormant);
+        envGrain   = get (ParamID::envGrain);
+        tapeStop   = get (ParamID::tapeStop);
+        bendUp     = get (ParamID::bendUp);
+        bendDown   = get (ParamID::bendDown);
+        vibRate    = get (ParamID::vibRate);
+        vibDepth   = get (ParamID::vibDepth);
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);
@@ -198,7 +269,8 @@ namespace grainlock
         // Parameters whose default is not what a version without them did.
         struct Legacy { const char* id; float value; };
         static constexpr Legacy legacy[] = {
-            { ParamID::autoGain, 0.0f },   // on for new work; older projects keep their level
+            { ParamID::autoGain, 0.0f },    // on for new work; older projects keep their level
+            { ParamID::wheelDest, 0.0f },   // 0.2 ignored the mod wheel; it must not start a vibrato in an old project
         };
 
         for (const char* id : ParamID::all)

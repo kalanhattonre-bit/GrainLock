@@ -2,22 +2,58 @@
 
 #include "Envelope.h"
 #include "GrainBuffer.h"
+#include "Lfo.h"
 #include "../Parameters.h"
 
 namespace grainlock
 {
+    /** One LFO as a voice sees it this sample. */
+    struct LfoFeed
+    {
+        bool inVoice = false;     // the voice adds it itself; otherwise it is already in the context's sums
+        bool perVoice = false;    // Voice and Once: the voice runs its own oscillator
+        bool once = false;
+        LfoShape shape = LfoShape::sine;
+        double increment = 0.0;   // cycles per sample
+        double offset = 0.0;      // the Phase control, 0..1
+        float depth = 0.0f;       // 0..1, negative when inverted, 0 while the LFO is off
+        float shared = 0.0f;      // the shared LFO's value x depth (smoothed for pitch and formant)
+        float fadeStep = 1.0f;    // fade-in per sample; 1 = no fade
+    };
+
+    /** The modulation settings every voice shares for a block. */
+    struct ModSettings
+    {
+        // Note envelope: rises 0..1 over Attack, falls back over Decay.
+        float envAttackStep = 1.0f, envDecayStep = 1.0f;
+        float envPitch = 0.0f, envFormant = 0.0f, envGrain = 0.0f;
+
+        bool tapeStop = false;
+        float tapeStep = 0.0f;        // semitones per sample while a released note slows down (negative)
+
+        // Keyboard sources (wheel, aftertouch, expression pedal): what each moves and by how much (-1..1).
+        std::array<ModDest, numModSources> dest { ModDest::off, ModDest::off, ModDest::off };
+        std::array<float, numModSources> amount { 0.0f, 0.0f, 0.0f };
+        bool anySource = false;
+        float vibratoDepthSemitones = 0.0f;
+        float pressureCoeff = 0.001f;   // smoothing of a voice's own (poly) aftertouch
+        float lfoSmoothCoeff = 0.01f;
+    };
+
     /** Per-sample values every voice shares, worked out once per sample by the engine. */
     struct VoiceContext
     {
         double sampleRate = 48000.0;
-        float globalSemitones = 0.0f;   // tune + fine + pitch bend + LFO pitch
+        float globalSemitones = 0.0f;   // tune + fine + pitch bend + the pitch LFO when every voice shares it
         float formantRatio = 1.0f;      // source read rate within each note period, before key tracking
+        float formantSemitones = 0.0f;  // what formantRatio was made from (Formant + the shared formant LFO)
         float trackAmount = 0.0f;       // 0..1: how far each grab's formant follows its key (root C3)
         bool autoGain = false;          // keep a loop as loud as the slice it came from
         bool legacySeam = false;        // tests only: 0.2's plain equal-power seam and no loop-point nudge
         float smooth = 0.1f;            // seam crossfade, fraction of the loop (0..0.5)
         float sustain = 1.0f;           // envelope sustain level, smoothed
-        int targetCycles = 2;           // grain cycles after LFO modulation
+        int targetCycles = 2;           // grain cycles after the shared LFO
+        float cyclesBase = 2.0f;        // what targetCycles was rounded from
         bool pitchLock = true;
         bool live = true;
         double refreshSamples = 1200.0;
@@ -26,6 +62,12 @@ namespace grainlock
         float captureRatioMax = 1.0f;
         int captureCyclesMax = 2;
         bool captureBothLayouts = false;   // Hold keeps its grain, so it must also cover a Pitch Lock toggle
+
+        // Per-voice modulation.
+        std::array<LfoFeed, numLfos> lfo;
+        ModSettings mods;
+        float wheel = 0.0f, pressure = 0.0f, expression = 1.0f;   // smoothed, 0..1; these are their rest values
+        float vibrato = 0.0f;                                     // the shared vibrato wave, -1..1
     };
 
     /** Where a voice grabs audio from: the input ring, ending offsetSamples before now. */
@@ -43,7 +85,12 @@ namespace grainlock
         repeats every N periods (the pitch drops by N).
 
         Changes that would jump the waveform (a fresh capture, a new cycle count, toggling Pitch
-        Lock) crossfade between two play states. */
+        Lock) crossfade between two play states.
+
+        A voice has two pitches. The base pitch (glide, tune, bend, pitch LFO) is the note it is
+        playing: grabs are sized for it. The sounding pitch adds the note envelope, vibrato and
+        tape stop, and only sets how fast the loop runs, so those move pitch and tone together,
+        like a sampler. */
     class GrainVoice
     {
     public:
@@ -53,6 +100,14 @@ namespace grainlock
             envelope.setTimes (attackMs, decayMs, releaseMs);
         }
 
+        /** A key was pressed: the voice is taken (note, level, order) but silent, with nothing grabbed. */
+        void arm (int midiNote, float velocityLevel, juce::uint64 order) noexcept;
+
+        /** The armed voice makes its grab and starts to sound. Every per-note clock (the envelopes, a
+            per-voice LFO's phase, an LFO's fade-in) starts here, not at the key. */
+        void beginSounding (const VoiceContext& ctx, const CaptureSource& source) noexcept;
+
+        /** arm() and beginSounding() at once. */
         void start (int midiNote, float velocityLevel, juce::uint64 order,
                     const VoiceContext& ctx, const CaptureSource& source);
 
@@ -60,9 +115,13 @@ namespace grainlock
             A negative velocityLevel keeps the current level. */
         void retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope);
 
+        /** Does nothing to a voice that is already released. */
         void release() noexcept;
         void steal (int fadeSamples) noexcept;
         void kill() noexcept;
+
+        /** This voice's own (polyphonic) aftertouch, 0..1. */
+        void setPressure (float zeroToOne) noexcept { polyPressure = juce::jlimit (0.0f, 1.0f, zeroToOne); }
 
         /** Adds this voice's output for one sample. */
         void render (const VoiceContext& ctx, const CaptureSource& source, float& outLeft, float& outRight) noexcept;
@@ -74,6 +133,10 @@ namespace grainlock
         bool isHeld() const noexcept      { return active && held && ! stealing; }
         bool isStealing() const noexcept  { return active && stealing; }
         bool isReleasing() const noexcept { return active && ! held && ! stealing; }
+        /** Armed but not yet sounding. */
+        bool isWaiting() const noexcept   { return active && waiting; }
+        /** Held and sounding: what holds the dry signal down for Dry When Idle. */
+        bool isEngaged() const noexcept   { return isHeld() && ! waiting; }
         int getNote() const noexcept      { return note; }
         juce::uint64 getStartOrder() const noexcept { return startOrder; }
 
@@ -123,9 +186,17 @@ namespace grainlock
             }
         };
 
+        enum class EnvStage { idle, attack, decay };
+
         double frequencyFor (double semitones) const noexcept;
-        /** Takes this voice's formant ratio and capture budget from the shared settings. */
-        void updateShape (const VoiceContext& ctx) noexcept;
+
+        /** Works out this voice's pitches, formant ratio, cycle count and level for one sample, from
+            the shared context plus its own LFOs, note envelope, pressure and tape stop. With nothing
+            of its own in play it hands back the context's numbers untouched. advance false: look,
+            without moving any clock (used when the voice starts). */
+        void evaluate (const VoiceContext& ctx, bool advance) noexcept;
+        void restartNoteEnvelope() noexcept;
+
         /** Formant Track: how much longer a cycle a grab made at capturePeriod reads than its own
             period, so that every key reads the same length of source (the C3 period x Formant). The
             loop still runs at the sounding pitch, which is what makes the formant follow the key. */
@@ -167,9 +238,28 @@ namespace grainlock
         Glide pitch;
 
         double sampleRate = 48000.0;
+
+        // This sample's result of evaluate().
+        double basePitch = 60.0, baseTargetPitch = 60.0;   // semitones; the target is where a glide ends
+        double soundingFrequency = 261.6;                  // Hz: how fast the loop runs
         float ratio = 1.0f;                 // this voice's formant ratio right now, before key tracking
         float captureRatio = 1.0f;          // the most formant this voice's next grab must hold
+        int cyclesNow = 2;                  // this voice's cycle count right now
+        float levelMod = 1.0f;              // level from a keyboard source
         float trackAmount = 0.0f;           // the Formant Track switch, as it fades
+
+        // Per-voice modulation state.
+        std::array<Lfo, numLfos> ownLfos;
+        std::array<float, numLfos> lfoFade {};
+        std::array<float, numLfos> lfoSmoothed {};
+        EnvStage noteEnvStage = EnvStage::idle;
+        float noteEnv = 0.0f;
+        bool noteEnvInstant = true;         // Attack is 0: the envelope starts at its peak
+        bool tapeStopEnabled = false;
+        bool tapeStopping = false;
+        double tapeSemitones = 0.0;
+        float polyPressure = 0.0f, polyPressureSmoothed = 0.0f;
+
         float gainSlew = 0.002f;
         int sinceMeasure = 0;
         double samplesSinceCapture = 0.0;   // how long ago the current grain's frozen instant was
@@ -179,6 +269,7 @@ namespace grainlock
         int note = 60;
         bool active = false;
         bool held = false;
+        bool waiting = false;
         bool stealing = false;
         int stealRemaining = 0;
         int stealLength = 1;

@@ -38,6 +38,8 @@ namespace grainlock
         envelope.prepare (sampleRate);
         level.reset (sampleRate, 0.005);
         gainSlew = (float) (1.0 - std::exp (-1.0 / (0.010 * sampleRate)));
+        for (int i = 0; i < numLfos; ++i)
+            ownLfos[(size_t) i].reset (lfoSeed (i));
         kill();
     }
 
@@ -47,10 +49,131 @@ namespace grainlock
         return std::isfinite (f) ? juce::jlimit (2.0, sampleRate * 0.25, f) : 440.0;
     }
 
-    void GrainVoice::updateShape (const VoiceContext& ctx) noexcept
+    void GrainVoice::restartNoteEnvelope() noexcept
     {
-        ratio = std::isfinite (ctx.formantRatio) ? juce::jlimit (0.25f, 4.0f, ctx.formantRatio) : 1.0f;
-        captureRatio = std::isfinite (ctx.captureRatioMax) ? juce::jlimit (0.25f, 4.0f, ctx.captureRatioMax) : 1.0f;
+        noteEnv = noteEnvInstant ? 1.0f : 0.0f;
+        noteEnvStage = noteEnvInstant ? EnvStage::decay : EnvStage::attack;
+    }
+
+    void GrainVoice::evaluate (const VoiceContext& ctx, bool advance) noexcept
+    {
+        const auto& mods = ctx.mods;
+        const double glide = advance ? pitch.next() : pitch.value;
+
+        // LFOs this voice adds itself: its own oscillator (Voice, Once), or the shared one faded in.
+        std::array<float, numLfos> lfoValue { 0.0f, 0.0f, 0.0f };
+        for (size_t i = 0; i < (size_t) numLfos; ++i)
+        {
+            const auto& feed = ctx.lfo[i];
+            if (! feed.inVoice)
+                continue;
+
+            float value = feed.shared;
+            if (feed.perVoice)
+                value = feed.depth * (advance ? ownLfos[i].next (feed.increment, feed.shape, feed.offset, feed.once)
+                                              : ownLfos[i].peek (feed.shape, feed.offset));
+
+            if (advance)
+                lfoFade[i] = juce::jmin (1.0f, lfoFade[i] + feed.fadeStep);
+            value *= lfoFade[i];
+
+            // The shared pitch and formant LFOs arrive smoothed; a voice's own are smoothed here
+            // (about 2 ms, which takes the click off Square and S&H). Grain steps crossfade instead.
+            if (feed.perVoice && i != (size_t) LfoTarget::grainCycles)
+            {
+                if (advance)
+                    lfoSmoothed[i] += mods.lfoSmoothCoeff * (value - lfoSmoothed[i]);
+                else
+                    lfoSmoothed[i] = value;
+                value = lfoSmoothed[i];
+            }
+            lfoValue[i] = std::isfinite (value) ? value : 0.0f;
+        }
+
+        // Note envelope.
+        tapeStopEnabled = mods.tapeStop;
+        noteEnvInstant = mods.envAttackStep >= 1.0f;
+        if (advance)
+        {
+            if (noteEnvStage == EnvStage::attack)
+            {
+                noteEnv += mods.envAttackStep;
+                if (noteEnv >= 1.0f)
+                {
+                    noteEnv = 1.0f;
+                    noteEnvStage = EnvStage::decay;
+                }
+            }
+            else if (noteEnvStage == EnvStage::decay)
+            {
+                noteEnv -= mods.envDecayStep;
+                if (noteEnv <= 0.0f)
+                {
+                    noteEnv = 0.0f;
+                    noteEnvStage = EnvStage::idle;
+                }
+            }
+
+            if (tapeStopping)
+                tapeSemitones = juce::jmax (-(double) tapeStopFallSemitones, tapeSemitones + (double) mods.tapeStep);
+        }
+
+        // Keyboard sources. d is how far a source is from rest: the wheel and aftertouch rest at 0,
+        // the expression pedal rests at full.
+        float vibratoDepth = 0.0f, sourceFormant = 0.0f, sourceCycles = 0.0f;
+        levelMod = 1.0f;
+        if (mods.anySource)
+        {
+            if (advance)
+                polyPressureSmoothed += mods.pressureCoeff * (polyPressure - polyPressureSmoothed);
+            else
+                polyPressureSmoothed = polyPressure;
+
+            const float distance[numModSources] = { ctx.wheel, juce::jmax (ctx.pressure, polyPressureSmoothed), 1.0f - ctx.expression };
+            for (size_t s = 0; s < (size_t) numModSources; ++s)
+            {
+                const float d = juce::jlimit (0.0f, 1.0f, distance[s]);
+                const float amount = mods.amount[s];
+                switch (mods.dest[s])
+                {
+                    case ModDest::vibrato: vibratoDepth += amount * d; break;
+                    case ModDest::formant: sourceFormant += amount * d * sourceFormantRangeSemitones; break;
+                    case ModDest::grain:   sourceCycles += amount * d * sourceCyclesRange; break;
+                    case ModDest::level:   levelMod *= amount >= 0.0f ? 1.0f - amount * d : 1.0f + amount * (1.0f - d); break;
+                    case ModDest::off:     break;
+                }
+            }
+        }
+
+        // Base pitch: the note being played. Grabs are sized for it. (With nothing added here it is
+        // exactly 0.2's sum.)
+        const double shared = (double) ctx.globalSemitones + (double) lfoValue[(size_t) LfoTarget::pitch] * (double) lfoPitchRangeSemitones;
+        basePitch = glide + shared;
+        baseTargetPitch = pitch.target + shared;
+
+        // Sounding pitch: only the loop rate follows it, so these move pitch and tone together.
+        const double sounding = basePitch
+                                + (double) (mods.envPitch * noteEnv)
+                                + (double) (mods.vibratoDepthSemitones * vibratoDepth * ctx.vibrato)
+                                + tapeSemitones;
+        soundingFrequency = frequencyFor (sounding);
+
+        // Formant and cycle count: the context's own numbers unless this voice adds something.
+        const float formantExtra = lfoValue[(size_t) LfoTarget::formant] * lfoFormantRangeSemitones
+                                   + mods.envFormant * noteEnv + sourceFormant;
+        ratio = juce::exactlyEqual (formantExtra, 0.0f) ? ctx.formantRatio
+                                                        : std::exp2 ((ctx.formantSemitones + formantExtra) / 12.0f);
+        ratio = std::isfinite (ratio) ? juce::jlimit (0.25f, 4.0f, ratio) : 1.0f;
+
+        const float cyclesExtra = lfoValue[(size_t) LfoTarget::grainCycles] * lfoCyclesRange
+                                  + mods.envGrain * noteEnv + sourceCycles;
+        cyclesNow = juce::exactlyEqual (cyclesExtra, 0.0f) ? ctx.targetCycles
+                                                           : juce::roundToInt (ctx.cyclesBase + cyclesExtra);
+        cyclesNow = juce::jlimit (minCycles, maxCycles, cyclesNow);
+
+        // A grab is sized for the budget, and never for less than this voice wants right now.
+        const float budget = std::isfinite (ctx.captureRatioMax) ? juce::jlimit (0.25f, 4.0f, ctx.captureRatioMax) : 1.0f;
+        captureRatio = juce::jmax (budget, ratio);
         trackAmount = juce::jlimit (0.0f, 1.0f, ctx.trackAmount);
     }
 
@@ -112,7 +235,7 @@ namespace grainlock
         // stays exactly where the key put it.
         const auto& ring = *source.ring;
         const int base = source.offsetSamples;
-        const double cycles = (double) juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
+        const double cycles = (double) cyclesNow;
         const double loopSource = cycles * period * (double) ratio * trackFactor (period);   // source samples back to the join
         const double loopPlayed = ctx.pitchLock ? period : cycles * period;                   // output samples per loop
         constexpr int window = 8;
@@ -172,7 +295,7 @@ namespace grainlock
                               const CaptureSource& source, bool nudge) noexcept
     {
         const double period = sampleRate / frequency;
-        const double n = (double) juce::jlimit (minCycles, maxCycles, ctx.captureCyclesMax);
+        const double n = (double) juce::jlimit (minCycles, maxCycles, juce::jmax (ctx.captureCyclesMax, cyclesNow));
         const double r = (double) captureRatio * trackReach (period);
 
         // Pitch Lock on needs (N + seam) periods; off needs N * (1 + seam).
@@ -273,12 +396,12 @@ namespace grainlock
         state.gainTarget += b * (gain - state.gainTarget);
     }
 
-    void GrainVoice::start (int midiNote, float velocityLevel, juce::uint64 order,
-                            const VoiceContext& ctx, const CaptureSource& source)
+    void GrainVoice::arm (int midiNote, float velocityLevel, juce::uint64 order) noexcept
     {
         note = midiNote;
         active = true;
         held = true;
+        waiting = true;
         stealing = false;
         pendingRecapture = false;
         startOrder = order;
@@ -286,11 +409,31 @@ namespace grainlock
         pitch.jumpTo ((double) midiNote);
         level.setCurrentAndTargetValue (velocityLevel);
 
+        polyPressure = polyPressureSmoothed = 0.0f;   // a reused slot never inherits the last note's pressure
+        tapeStopping = false;
+        tapeSemitones = 0.0;
+        transition.active = false;
+        envelope.reset();
+    }
+
+    void GrainVoice::beginSounding (const VoiceContext& ctx, const CaptureSource& source) noexcept
+    {
+        waiting = false;
+
+        // Every per-note clock starts here: the voice's own LFOs, their fade-in, the note envelope.
+        for (size_t i = 0; i < (size_t) numLfos; ++i)
+        {
+            ownLfos[i].restart();
+            lfoFade[i] = ctx.lfo[i].fadeStep >= 1.0f ? 1.0f : 0.0f;
+            lfoSmoothed[i] = 0.0f;
+        }
+        noteEnvInstant = ctx.mods.envAttackStep >= 1.0f;
+        restartNoteEnvelope();
+        evaluate (ctx, false);
+
         current = 0;
-        const int cycles = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
-        const double frequency = frequencyFor (pitch.value + (double) ctx.globalSemitones);
-        updateShape (ctx);
-        capture (grains[0], frequency, ctx, source);
+        const int cycles = cyclesNow;
+        capture (grains[0], frequencyFor (basePitch), ctx, source);
 
         PlayState first;
         first.grain = 0;
@@ -308,11 +451,24 @@ namespace grainlock
         envelope.noteOn();
     }
 
+    void GrainVoice::start (int midiNote, float velocityLevel, juce::uint64 order,
+                            const VoiceContext& ctx, const CaptureSource& source)
+    {
+        arm (midiNote, velocityLevel, order);
+        beginSounding (ctx, source);
+    }
+
     void GrainVoice::retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope)
     {
         note = midiNote;
         held = true;
         stealing = false;
+
+        // A new key takes back a note that was slowing to a stop.
+        tapeStopping = false;
+        tapeSemitones = 0.0;
+        if (retriggerEnvelope)
+            restartNoteEnvelope();
 
         pitch.moveTo ((double) midiNote, glideSamples);
         if (velocityLevel >= 0.0f)
@@ -327,11 +483,19 @@ namespace grainlock
 
     void GrainVoice::release() noexcept
     {
-        if (! active || stealing)
+        // A second release would restart the Release time from the level the first has reached.
+        if (! active || stealing || ! held)
             return;
 
         held = false;
+        if (waiting)
+        {
+            kill();   // released before it ever sounded: nothing to fade
+            return;
+        }
+
         envelope.noteOff();
+        tapeStopping = tapeStopEnabled;   // slows to a halt over the Release time, and stops re-grabbing
     }
 
     void GrainVoice::steal (int fadeSamples) noexcept
@@ -349,8 +513,11 @@ namespace grainlock
     {
         active = false;
         held = false;
+        waiting = false;
         stealing = false;
         pendingRecapture = false;
+        tapeStopping = false;
+        tapeSemitones = 0.0;
         transition.active = false;
         envelope.reset();
     }
@@ -482,12 +649,12 @@ namespace grainlock
 
         PlayState fresh = states[(size_t) previous];
         fresh.grain = 1 - states[(size_t) previous].grain;
-        fresh.cycles = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
+        fresh.cycles = cyclesNow;
         fresh.lockOn = ctx.pitchLock;
 
         // Sized for the note being glided TO, so a slice is always its own note's wavelength.
         auto& grain = grains[(size_t) fresh.grain];
-        capture (grain, frequencyFor (pitch.target + (double) ctx.globalSemitones), ctx, source);
+        capture (grain, frequencyFor (baseTargetPitch), ctx, source);
         fresh.taps = tapsThatFit (grain, fresh.cycles, fresh.lockOn, ratio);
 
         // A re-grab of the same shape moves towards its new measurements, so noise in them does not
@@ -514,7 +681,7 @@ namespace grainlock
         const auto& before = states[(size_t) previous];
 
         PlayState reshaped = before;
-        reshaped.cycles = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
+        reshaped.cycles = cyclesNow;
         reshaped.lockOn = ctx.pitchLock;
         reshaped.taps = tapsThatFit (grains[(size_t) reshaped.grain], reshaped.cycles, reshaped.lockOn, ratio);
         measure (reshaped, ctx, gainPointsFirst, 1.0f);
@@ -573,16 +740,17 @@ namespace grainlock
 
     void GrainVoice::render (const VoiceContext& ctx, const CaptureSource& source, float& outLeft, float& outRight) noexcept
     {
-        if (! active)
+        if (! active || waiting)
             return;
 
-        const double frequency = frequencyFor (pitch.next() + (double) ctx.globalSemitones);
-        updateShape (ctx);
+        evaluate (ctx, true);
+        const double frequency = soundingFrequency;
+        const bool live = ctx.live && ! tapeStopping;   // a note slowing to a stop keeps the audio it has
 
         if (! transition.active)
         {
             const auto& now = states[(size_t) current];
-            const int wanted = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
+            const int wanted = cyclesNow;
 
             const auto& grain = grains[(size_t) now.grain];
 
@@ -598,12 +766,12 @@ namespace grainlock
 
                 if (holds)
                     beginReshape (ctx);
-                else if (ctx.live && ! grain.isFull())
+                else if (live && ! grain.isFull())
                     beginRecapture (frequency, ctx, source);
-                else if (ctx.live || ! beginExtend (wanted, ctx.pitchLock, ctx, source))
+                else if (live || ! beginExtend (wanted, ctx.pitchLock, ctx, source))
                     beginReshape (ctx);
             }
-            else if (! ctx.live && ! grainHolds (grain, now.taps, now.lockOn, ratio))
+            else if (! live && ! grainHolds (grain, now.taps, now.lockOn, ratio))
             {
                 // Formant turned up past what the Hold grain holds.
                 beginExtend (now.cycles, now.lockOn, ctx, source);
@@ -659,14 +827,14 @@ namespace grainlock
 
         // Live: grab fresh audio at a loop boundary once Refresh has elapsed and the loop has
         // repeated at least twice (a loop that refreshes every pass is just a delay, not a pitch).
-        if (wrapped && ctx.live && ! transition.active && ! pendingRecapture)
+        if (wrapped && live && ! transition.active && ! pendingRecapture)
         {
             const double loop = loopLengthSamples (states[(size_t) current], frequency);
             if (samplesSinceCapture >= juce::jmax (ctx.refreshSamples, 2.0 * loop))
                 beginRecapture (frequency, ctx, source);
         }
 
-        float gain = envelope.next (ctx.sustain) * level.getNextValue();
+        float gain = envelope.next (ctx.sustain) * level.getNextValue() * levelMod;
 
         if (stealing)
         {
