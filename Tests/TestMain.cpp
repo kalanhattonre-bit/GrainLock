@@ -1594,6 +1594,35 @@ namespace
             check (start < 15.0 && std::abs (half - 50.0) <= 12.0 && std::abs (full - 100.0) <= 6.0,
                    fmt ("Fade 1 s: %+.0f cents at the start, %+.0f half-way, %+.0f once it is in", start, half, full));
         }
+
+        // Once: the dot on the knob shows what the note is getting. After the one cycle it rests at the
+        // bottom of the square and stays there; it is not the free-running wave no note is playing.
+        {
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::pitchLfoOn, 1.0f);
+            h.set (ParamID::pitchLfoShape, (float) (int) LfoShape::square);
+            h.set (ParamID::pitchLfoRate, 4.0f);   // one cycle = 12000 samples
+            h.set (ParamID::pitchLfoDepth, 100.0f);
+            h.set (ParamID::pitchLfoTrig, (float) (int) LfoTrig::once);
+            const auto noise = noiseInput (42000, 7, 0.25f);
+            const std::vector<float> lead (noise.begin(), noise.begin() + 4800), head (noise.begin(), noise.begin() + 28000),
+                                     middle (noise.begin() + 28000, noise.begin() + 35600), tail (noise.begin() + 35600, noise.end());
+            // The queue to the display holds seven frames and drops what comes after: it is emptied
+            // before each stretch that is read.
+            ScopeFrame atRest, later, laterStill, old;
+            play (h, lead, {});
+            const bool a = h.proc.getScopeFifo().pullLatest (atRest);
+            play (h, head, { keyDown (4800, 69) });
+            h.proc.getScopeFifo().pullLatest (old);
+            play (h, middle, {});                     // ends 30800 samples after the key: two and a half cycles
+            const bool b = h.proc.getScopeFifo().pullLatest (later);
+            play (h, tail, {});                       // 6400 more: half a cycle and a bit on a free-running wave
+            const bool c = h.proc.getScopeFifo().pullLatest (laterStill);
+            check (a && b && c && std::abs (atRest.lfoValues[0]) < 0.001f && later.lfoValues[0] < -0.9f && laterStill.lfoValues[0] < -0.9f,
+                   fmt ("Once, square: the display's dot is at %+.2f with no note, and at %+.2f and %+.2f after the note's one cycle (it rests at the bottom)",
+                        (double) atRest.lfoValues[0], (double) later.lfoValues[0], (double) laterStill.lfoValues[0]));
+        }
     }
 
     void testNoteEnvelope()
@@ -2397,6 +2426,56 @@ namespace
             const float sounding = largestDifference (out, steady, 49300, 50100);
             check (sounding > 0.02f && juce::exactlyEqual (largestDifference (out, steady, 0, 49200), 0.0f),
                    fmt ("Snap 25 ms, Threshold on, Max Wait 0, no hit: a 20 ms tap over loud input still plays, 25 ms later (%.2f from the dry)", (double) sounding));
+        }
+
+        {
+            // Hiss, then a tone, with the key pressed in the hiss. Threshold alone takes the hiss at
+            // once (it is loud enough). With Skip Hiss as well the key waits for the tone.
+            auto hissThenTone = harmonicInput (144000, 220.0, 5, 0.05);
+            const auto noise = noiseInput (144000, 37, 0.1f);
+            for (size_t i = 0; i < 60000; ++i)
+                hissThenTone[i] = noise[i];
+            auto run = [&hissThenTone] (bool skipHiss)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::grainCycles, 1.0f);
+                h.set (ParamID::threshold, -45.0f);
+                h.set (ParamID::maxWait, 2000.0f);
+                h.set (ParamID::skipHiss, skipHiss ? 1.0f : 0.0f);
+                return play (h, hissThenTone, { keyDown (24000, 57) });
+            };
+            const auto guarded = run (true), plain = run (false);
+            const int guardedStart = (int) firstSoundIn (guarded), plainStart = (int) firstSoundIn (plain);
+            const double balance = toneBalanceDb (slice (guarded, 144000 - 32768, 32768), 220.0);
+            check (plainStart >= 24000 && plainStart <= 24002 && guardedStart >= 60000 && guardedStart <= 62400 && balance < -30.0,
+                   fmt ("Threshold with Skip Hiss, a key pressed on hiss: the note waits for the tone (%d samples after it begins; without Skip Hiss it starts %d samples after the key, on the hiss) and plays the tone (2 kHz against 1 kHz: %+.1f dB)",
+                        guardedStart - 60000, plainStart - 24000, balance));
+        }
+
+        {
+            // What the display is told a waiting key is waiting for: its Wait first (whatever Threshold
+            // is set to), then sound.
+            const std::vector<float> longer (28000, 0.0f), shorter (8000, 0.0f);
+            Harness h (48000.0, 256);
+            h.set (ParamID::threshold, -45.0f);
+            h.set (ParamID::maxWait, 2000.0f);
+            h.set (ParamID::wait, 500.0f);
+            // (The queue to the display holds seven frames and drops what comes after: it is emptied
+            // before each stretch that is read.)
+            ScopeFrame duringWait, afterWait, old;
+            play (h, longer, { keyDown (24000, 60) });
+            h.proc.getScopeFifo().pullLatest (old);
+            play (h, shorter, {});                        // ends 250 ms into the 500 ms Wait
+            const bool first = h.proc.getScopeFifo().pullLatest (duringWait);
+            play (h, longer, {});
+            h.proc.getScopeFifo().pullLatest (old);
+            play (h, shorter, {});                        // ends 500 ms past it, still silent
+            const bool second = h.proc.getScopeFifo().pullLatest (afterWait);
+            check (first && second && duringWait.isWaiting (60) && duringWait.waitingFor == 0
+                       && afterWait.isWaiting (60) && afterWait.waitingFor == 2,
+                   fmt ("a key with Wait 500 ms and Threshold on, in silence: the display is told it waits for its time during the Wait (%d) and for sound after it (%d)",
+                        duringWait.waitingFor, afterWait.waitingFor));
         }
     }
 

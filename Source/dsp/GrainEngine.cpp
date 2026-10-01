@@ -831,6 +831,8 @@ namespace grainlock
         // Threshold: the slice that would be grabbed now must be above it all the way through. It is
         // looked at every 32 samples; Max Wait later the note grabs whatever is there, so a key
         // never silently does nothing - unless it has already come up, and then it is forgotten.
+        // With Skip Hiss on (Live), a slice that is more than a quarter hiss does not count as sound
+        // either: the same rule a sounding note's re-grabs go by.
         if (thresholdLevel > 0.0f)
         {
             const int lag = (int) juce::jlimit ((juce::int64) 0, (juce::int64) (ring.size() - 16), plan.dueTime - plan.planEnd);
@@ -847,6 +849,9 @@ namespace grainlock
                     plan.dipHop = -1;
                     plan.dipThreshold = thresholdLevel;
                     passes = tracker.covered (lag, plan.region, thresholdLevel, true, &plan.dipHop);
+                    if (passes && block.skipHiss && block.captureMode == CaptureMode::live
+                        && tracker.hissShare (lag, plan.region) > 0.25f)
+                        passes = false;
                 }
             }
 
@@ -1469,6 +1474,14 @@ namespace grainlock
     {
         ScopeFrame frame;
 
+        // Why a key that is down has not grabbed yet, stage for stage as grabReady goes through them.
+        auto reasonOf = [this] (const PendingGrab& plan)
+        {
+            if (sampleClock < plan.dueTime)           return 0;
+            if (snapSamples > 0 && ! plan.unsnapped)  return plan.anchored ? 0 : 1;
+            return thresholdLevel > 0.0f ? 2 : 0;
+        };
+
         // Sounding voices, oldest first.
         std::array<int, numVoiceSlots> order {};
         int count = 0;
@@ -1476,12 +1489,21 @@ namespace grainlock
         {
             const auto& voice = voices[(size_t) i];
             if (voice.isWaiting())
+            {
                 frame.setWaiting (voice.getNote());
+                if (pendingGrabs[(size_t) i].active)
+                    frame.waitingFor = juce::jmax (frame.waitingFor, reasonOf (pendingGrabs[(size_t) i]));
+            }
             else if (voice.isActive() && ! voice.isStealing())
+            {
                 order[(size_t) count++] = i;
+            }
         }
         if (monoKey.active)
+        {
             frame.setWaiting (monoKey.note);
+            frame.waitingFor = juce::jmax (frame.waitingFor, reasonOf (monoKey.grab));
+        }
         frame.offsetMs = (float) (1000.0 * offsetSamples / sampleRate);
         frame.waitMs = (float) (1000.0 * waitSamples / sampleRate);
 
@@ -1523,7 +1545,8 @@ namespace grainlock
         frame.seamFraction = ctx.smooth;
         for (size_t i = 0; i < (size_t) numLfos; ++i)
         {
-            frame.lfoValues[i] = lfoLastScaled[i];
+            frame.lfoValues[i] = ctx.lfo[i].inVoice ? (focus >= 0 ? voices[(size_t) focus].shownLfo ((int) i) : 0.0f)
+                                                    : lfoLastScaled[i];
             frame.lfoActive[i] = block.lfos[i].on && block.lfos[i].depthPercent > 0.0f;
         }
         frame.live = ctx.live;

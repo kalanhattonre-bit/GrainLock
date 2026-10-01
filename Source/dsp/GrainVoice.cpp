@@ -107,6 +107,7 @@ namespace grainlock
             }
             lfoValue[i] = std::isfinite (value) ? value : 0.0f;
         }
+        lfoShown = lfoValue;
 
         // Note envelope.
         tapeStopEnabled = mods.tapeStop;

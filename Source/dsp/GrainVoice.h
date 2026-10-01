@@ -205,6 +205,9 @@ namespace grainlock
         bool isReleasing() const noexcept { return active && ! held && ! stealing; }
         /** Armed but not yet sounding. */
         bool isWaiting() const noexcept   { return active && waiting; }
+        /** For the display: what LFO i adds on this voice (value x depth x fade-in, -1..1) when the
+            voice runs that LFO itself (Starts at Voice or Once, or a Fade In). */
+        float shownLfo (int i) const noexcept { return lfoShown[(size_t) i]; }
         /** Sounding, and still on (held, or playing out the length of a key that came up while it
             waited): what holds the dry signal down for Dry When Idle. */
         bool isEngaged() const noexcept   { return active && ! stealing && ! waiting && (held || gateRemaining > 0); }
@@ -368,6 +371,7 @@ namespace grainlock
         int shapeAge = 0;                   // samples of this note in the line
         float shapeFade = 144.0f;           // a delayed read fades in over this many samples once the note has reached it
         std::array<float, numLfos> lfoFade {};
+        std::array<float, numLfos> lfoShown {};   // for the display: what each LFO added on this voice at its last sample
         std::array<float, numLfos> lfoSmoothed {};
         EnvStage noteEnvStage = EnvStage::idle;
         float noteEnv = 0.0f;

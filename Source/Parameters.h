@@ -268,7 +268,8 @@ namespace grainlock
     /** Gives every parameter that a saved state does not mention a definite value, before the state is
         loaded. (JUCE leaves such a parameter at whatever the instance had, so an old preset loaded onto
         a live instance would keep that instance's newer settings.) The value is what the older version
-        effectively did: Auto Gain off, because it did not exist; the default for everything else. */
+        effectively did: Auto Gain, the mod wheel and the sustain pedal off, because 0.2 did not have
+        them; the default for everything else. */
     void fillMissingParameters (juce::XmlElement& state, const juce::AudioProcessorValueTreeState& apvts);
 
     /** Note name as Cubase shows it by default (middle C, MIDI 60, is C3). */
