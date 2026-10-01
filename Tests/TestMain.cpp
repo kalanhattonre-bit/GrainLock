@@ -2488,7 +2488,7 @@ namespace
             for (size_t i = 0; i < 30000; ++i)
                 cycled[i] = 0.0f;
 
-            auto firstSoundCycled = [&cycled] (int block)
+            auto firstSoundCycled = [] (const std::vector<float>& input, int block, double firstPpq, double cycleBeats)
             {
                 Harness h (48000.0, block);
                 h.set (ParamID::dryWhenIdle, 0.0f);
@@ -2503,15 +2503,15 @@ namespace
                 midi.ensureSize (64);
 
                 int first = -1;
-                const int total = (int) cycled.size();
+                const int total = (int) input.size();
                 for (int pos = 0; pos < total; pos += block)
                 {
                     const int n = std::min (block, total - pos);
                     buffer.setSize (2, n, false, false, true);
                     for (int i = 0; i < n; ++i)
                     {
-                        buffer.setSample (0, i, cycled[(size_t) (pos + i)]);
-                        buffer.setSample (1, i, cycled[(size_t) (pos + i)]);
+                        buffer.setSample (0, i, input[(size_t) (pos + i)]);
+                        buffer.setSample (1, i, input[(size_t) (pos + i)]);
                     }
 
                     midi.clear();
@@ -2521,7 +2521,7 @@ namespace
                         midi.addEvent (noteOn, 3, 6000 - pos);
                     }
 
-                    playHead.ppq = 1.0 + std::fmod ((double) pos / 24000.0, 1.0);
+                    playHead.ppq = firstPpq + std::fmod ((double) pos / 24000.0, cycleBeats);
                     h.proc.processBlock (buffer, midi);
 
                     for (int i = 0; i < n && first < 0; ++i)
@@ -2531,10 +2531,21 @@ namespace
                 h.proc.setPlayHead (nullptr);
                 return first;
             };
-            const int split = firstSoundCycled (240), unsplit = firstSoundCycled (256);
+            const int split = firstSoundCycled (cycled, 240, 1.0, 1.0), unsplit = firstSoundCycled (cycled, 256, 1.0, 1.0);
             check (split >= 48000 && split <= 48002 && unsplit == split,
                    fmt ("a host cycle of one grid line: sound that starts a quarter of the way through is picked up at the next return (sample %d, and %d when the block does not end on the wrap; the return is at 48000)",
                         split, unsplit));
+
+            // A cycle of a beat and a half from the top of the song. The return is a line (beat 1), and
+            // it comes exactly half a line after the one before it (beat 2): the closest two lines can
+            // be. Sound that starts between the two is picked up at the return, not a beat later.
+            auto halfLine = noiseInput (96000, 46, 0.25f);
+            for (size_t i = 0; i < 62000; ++i)
+                halfLine[i] = 0.0f;
+            const int atReturn = firstSoundCycled (halfLine, 240, 0.0, 1.5);
+            check (atReturn >= 72000 && atReturn <= 72002,
+                   fmt ("a host cycle of a line and a half: the return, half a line after the last line, is a line too (first sound at sample %d; the return is at 72000, the line after it at 96000, the end of the input)",
+                        atReturn));
         }
     }
 
@@ -2751,14 +2762,16 @@ namespace
             Harness h (48000.0, 256);
             frozenOnly (h);
             h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
-            const auto out = play (h, input, { keyDown (24000, 60), keyDown (24000, 64), keyDown (24000, 67),
-                                               keyUp (28800, 60), keyUp (28800, 64), keyUp (28800, 67),
+            // (C, E and G sharp: no two of them share a harmonic, so each can be told from the others.)
+            const auto out = play (h, input, { keyDown (24000, 60), keyDown (24000, 64), keyDown (24000, 68),
+                                               keyUp (28800, 60), keyUp (28800, 64), keyUp (28800, 68),
                                                keyDown (72000, 66), keyUp (74400, 66) });
-            const double chordE = noteAgainst (out, 36000, 64, 60);
+            const double chordE = noteAgainst (out, 36000, 64, 60), chordG = noteAgainst (out, 36000, 68, 60);
             const double afterC = noteAgainst (out, 100000, 60, 66);
-            check (std::abs (chordE) < 10.0 && afterC < -30.0 && largestSample (out, 130000, 140000) > 0.01f,
-                   fmt ("Latch: C-E-G rings on with every key up (E against C: %+.1f dB); tapping F# replaces the chord (C against F#: %+.1f dB) and F# rings on",
-                        chordE, afterC));
+            check (largestSample (out, 36000, 68000) > 0.01f && std::abs (chordE) < 12.0 && std::abs (chordG) < 12.0
+                       && afterC < -30.0 && largestSample (out, 130000, 140000) > 0.01f,
+                   fmt ("Latch: C-E-G# rings on with every key up (E against C: %+.1f dB, G# against C: %+.1f dB); tapping F# replaces the chord (C against F#: %+.1f dB) and F# rings on",
+                        chordE, chordG, afterC));
         }
 
         {
@@ -2791,6 +2804,51 @@ namespace
             check (off.first > 0.02f && juce::exactlyEqual (off.second, 0.0f) && stopped.first > 0.02f && juce::exactlyEqual (stopped.second, 0.0f),
                    fmt ("a latched note ends when Latch is switched off (dry untouched: %g) and when the song stops (%g)",
                         (double) off.second, (double) stopped.second));
+        }
+
+        {
+            // The song stops while a latched key is still down, and the key-up comes after the stop
+            // (a host sends the key-ups of its track's notes because of the stop). The note ends there.
+            for (const bool mono : { false, true })
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::release, 30.0f);
+                h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+                h.set (ParamID::mono, mono ? 1.0f : 0.0f);
+                const auto first = play (h, input, { keyDown (24000, 60) }, 0.0, 120.0);
+                const auto second = play (h, input, { keyUp (0, 60) });   // no play head: the song has stopped
+                const float ringing = largestDifference (first, input, 120000, 140000), left = largestDifference (second, input, 24000, second.size());
+                check (ringing > 0.02f && juce::exactlyEqual (left, 0.0f),
+                       fmt ("Latch, %s: a key still down when the song stops ends its note when it comes up (dry untouched afterwards: %g)",
+                            mono ? "mono" : "poly", (double) left));
+            }
+
+            // Mono, Latch: C held down, E tapped over it (the note is now E, latched). Latch is switched
+            // off: E's key is up, so E ends, and the note falls back to C, whose key is still down.
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::mono, 1.0f);
+                h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+                const auto first = play (h, input, { keyDown (24000, 60), keyDown (36000, 64), keyUp (40000, 64) });
+                h.set (ParamID::holdMode, (float) (int) HoldMode::normal);
+                const auto second = play (h, input, {});
+                const double latched = noteAgainst (first, 100000, 64, 60), back = noteAgainst (second, 60000, 60, 64);
+                check (latched > 10.0 && back > 10.0 && largestSample (second, 120000, 140000) > 0.01f,
+                       fmt ("Mono, Latch switched off with C still down under a latched E: the note was E (%+.1f dB against C) and falls back to C (%+.1f dB against E), still sounding",
+                            latched, back));
+            }
+
+            // Held through a stop and a start, the key is latched again: its key-up in the running song is ignored.
+            Harness h (48000.0, 256);
+            h.set (ParamID::release, 30.0f);
+            h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+            play (h, input, { keyDown (24000, 60) }, 0.0, 120.0);
+            play (h, input, {});
+            const auto third = play (h, input, { keyUp (24000, 60) }, 0.0, 120.0);
+            check (largestDifference (third, input, 120000, 140000) > 0.02f,
+                   fmt ("Latch: a key held through Stop and Play is latched again when it comes up in the running song (still sounding: %.2f)",
+                        (double) largestDifference (third, input, 120000, 140000)));
         }
 
         {
@@ -2871,15 +2929,16 @@ namespace
                         tail, held));
         }
 
-        // Mono, Glide 200 ms, C2 then another key 250 ms later. The first note's Release is long, so its
-        // voice is still there for the second key to take over whether or not the keys overlap.
-        auto monoGlide = [&input] (bool legatoOnly, bool perOctave, int to, bool overlap)
+        // Mono, Glide 200 ms unless told otherwise, C2 then another key 250 ms later. The first note's
+        // Release is long, so its voice is still there for the second key to take over whether or not
+        // the keys overlap.
+        auto monoGlide = [&input] (bool legatoOnly, bool perOctave, int to, bool overlap, float glideMs = 200.0f)
         {
             Harness h (48000.0, 256);
             h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
             h.set (ParamID::dryWhenIdle, 0.0f);
             h.set (ParamID::mono, 1.0f);
-            h.set (ParamID::glide, 200.0f);
+            h.set (ParamID::glide, glideMs);
             h.set (ParamID::release, 2000.0f);
             h.set (ParamID::glideLegato, legatoOnly ? 1.0f : 0.0f);
             h.set (ParamID::glideRate, perOctave ? 1.0f : 0.0f);
@@ -2908,31 +2967,43 @@ namespace
         }
 
         {
-            // Per octave: two octaves take twice the Glide time. 300 ms after the key the plain glide
-            // has arrived; the per-octave one is about half an octave short.
-            const double plain = centsAt (monoGlide (false, false, 72, true), 50400, 400.0, 800.0, 72);
-            const double perOctave = centsAt (monoGlide (false, true, 72, true), 50400, 300.0, 500.0, 72);
-            check (std::abs (plain) <= 30.0 && perOctave < -350.0 && perOctave > -850.0,
-                   fmt ("Glide 200 ms over two octaves, 300 ms after the key: %+.0f cents from the note as a fixed time, %+.0f cents as a time per octave",
-                        plain, perOctave));
+            // Per octave, C2 to C4. A slow glide (1 s) read a quarter of a second after the key, where
+            // the pitch barely moves inside the reading: as a fixed time it is a quarter of the way up
+            // the two octaves (-1800 cents from C4); as a time per octave it takes 2 s, so an eighth
+            // (-2100). And at 200 ms per octave it has arrived 450 ms after the key, as the fixed 200 ms
+            // has after 300.
+            const double fixedSlow = centsAt (monoGlide (false, false, 72, true, 1000.0f), 48000, 125.0, 240.0, 72);
+            const double perOctaveSlow = centsAt (monoGlide (false, true, 72, true, 1000.0f), 48000, 125.0, 240.0, 72);
+            const double fixedThere = centsAt (monoGlide (false, false, 72, true), 50400, 400.0, 800.0, 72);
+            const double perOctaveThere = centsAt (monoGlide (false, true, 72, true), 57600, 400.0, 800.0, 72);
+            check (fixedSlow > -1850.0 && fixedSlow < -1690.0 && perOctaveSlow > -2150.0 && perOctaveSlow < -2020.0,
+                   fmt ("Glide 1 s over two octaves, 250 ms after the key: %+.0f cents from the note as a fixed time (a quarter of the way: -1800), %+.0f cents as a time per octave (an eighth: -2100)",
+                        fixedSlow, perOctaveSlow));
+            check (std::abs (fixedThere) <= 30.0 && std::abs (perOctaveThere) <= 30.0,
+                   fmt ("Glide 200 ms over two octaves: there after 300 ms as a fixed time (%+.0f cents), and after 450 ms as a time per octave (%+.0f cents)",
+                        fixedThere, perOctaveThere));
         }
 
         {
-            // Poly Glide: a new note slides in from the last key played.
+            // Poly Glide: a new note slides in from the last key played. A slow glide (2 s over the
+            // octave C2 to C3), read a quarter and a half of a second after the key: an eighth and a
+            // quarter of the way.
             auto run = [&input] (bool polyGlide)
             {
                 Harness h (48000.0, 256);
                 h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
                 h.set (ParamID::dryWhenIdle, 0.0f);
-                h.set (ParamID::glide, 200.0f);
+                h.set (ParamID::glide, 2000.0f);
                 h.set (ParamID::release, 30.0f);
                 h.set (ParamID::polyGlide, polyGlide ? 1.0f : 0.0f);
                 return play (h, input, { keyDown (24000, 48), keyUp (30000, 48), keyDown (36000, 60) });
             };
-            const double gliding = centsAt (run (true), 38400, 125.0, 240.0, 60);
-            const double plain = centsAt (run (false), 38400, 200.0, 400.0, 60);
-            check (std::abs (plain) <= 30.0 && gliding < -500.0 && gliding > -1000.0,
-                   fmt ("Poly Glide, 50 ms after the second key: %+.0f cents from the note with it on, %+.0f cents with it off", gliding, plain));
+            const auto sliding = run (true);
+            const double eighth = centsAt (sliding, 48000, 125.0, 240.0, 60), quarter = centsAt (sliding, 60000, 125.0, 240.0, 60);
+            const double plain = centsAt (run (false), 48000, 200.0, 400.0, 60);
+            check (std::abs (plain) <= 30.0 && eighth > -1090.0 && eighth < -1000.0 && std::abs (quarter + 900.0) <= 60.0,
+                   fmt ("Poly Glide 2 s: %+.0f cents from the note 250 ms after the second key (an eighth of the way: -1050) and %+.0f cents after 500 ms (a quarter: -900); %+.0f cents with it off",
+                        eighth, quarter, plain));
         }
     }
 
@@ -3076,6 +3147,79 @@ namespace
                    fmt ("Diffuse 100%%, Dry When Idle: a second after the note the output is the input again, exactly (max difference %g)",
                         (double) largestDifference (out, noise, 100000, out.size())));
         }
+
+        {
+            // A Tone control moved while nothing sounds is in place for the next note from its first
+            // sample: the note is the one a plugin that always had that setting plays. The same after
+            // the host has set the plugin up again (an export, a change of sample rate).
+            const auto noise = noiseInput (96000, 64, 0.25f);
+            auto secondNote = [&] (float lowCutBefore, bool setUpAgain)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::outGain, -12.0f);
+                h.set (ParamID::release, 30.0f);
+                h.set (ParamID::lowCut, lowCutBefore);
+                play (h, noise, { keyDown (24000, 57), keyUp (48000, 57) });
+                h.set (ParamID::lowCut, 2000.0f);
+                if (setUpAgain)
+                    h.proc.prepareToPlay (48000.0, 256);
+                return play (h, noise, { keyDown (24000, 57) });
+            };
+            const auto always = secondNote (2000.0f, false), moved = secondNote (100.0f, false), again = secondNote (2000.0f, true);
+            const float afterMove = largestDifference (always, moved, 24000, 72000), afterSetUp = largestDifference (always, again, 24000, 72000);
+            check (largestSample (always, 30000, 72000) > 0.001f && afterMove < 1.0e-5f && afterSetUp < 1.0e-5f,
+                   fmt ("Low Cut moved to 2 kHz at rest: the next note is the one a plugin always at 2 kHz plays (max difference %g); the same after the host sets the plugin up again (%g)",
+                        (double) afterMove, (double) afterSetUp));
+        }
+
+        {
+            // One bad input sample with a Tone stage on must not silence the note for as long as it is held.
+            auto bad = noiseInput (240000, 65, 0.25f);
+            bad[30000] = std::numeric_limits<float>::quiet_NaN();
+            Harness h (48000.0, 256);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::lowCut, 80.0f);
+            const std::vector<float> head (bad.begin(), bad.begin() + 96000), tail (bad.begin() + 96000, bad.end());
+            play (h, head, { keyDown (12000, 57) });
+            h.proc.resetLimiterStats();
+            const auto out = play (h, tail, {});
+            const int late = h.proc.getLimiterStats().nonFiniteInputs;
+            const float peak = largestSample (out, 104000, 144000);
+            check (late == 0 && peak > 0.01f,
+                   fmt ("one NaN input sample with Low Cut on: from a second later nothing non-finite reaches the limiter (%d) and the held note still sounds (peak %.2f)",
+                        late, (double) peak));
+        }
+
+        {
+            // All Sound Off (CC 120) is all sound off: nothing rings on in Diffuse.
+            const auto noise = noiseInput (96000, 66, 0.25f);
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::diffuse, 100.0f);
+            const auto out = play (h, noise, { keyDown (24000, 57), keyDown (24000, 64), controller (48000, 120, 0) });
+            check (largestSample (out, 40000, 48000) > 0.01f && juce::exactlyEqual (largestSample (out, 48001, out.size()), 0.0f),
+                   fmt ("Diffuse 100%%, All Sound Off: the chord (peak %.2f) is silent from the next sample (peak after it %g)",
+                        (double) largestSample (out, 40000, 48000), (double) largestSample (out, 48001, out.size())));
+        }
+
+        {
+            // Diffuse switched off under a held note fades out over 10 ms. Its delay lengths must not
+            // shrink under the fade: that is a burst of steps. The source is smooth (eight harmonics of
+            // 220 Hz), so the largest step from one sample to the next shows it.
+            const auto source = harmonicInput (96000, 220.0, 8, 0.03);
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::diffuse, 100.0f);
+            const std::vector<float> head (source.begin(), source.begin() + 48000), tail (source.begin() + 48000, source.end());
+            const auto before = play (h, head, { keyDown (24000, 57) });
+            h.set (ParamID::diffuse, 0.0f);
+            const auto after = play (h, tail, {});
+            const float steady = largestStep (before, 40000, 48000), switching = largestStep (after, 0, 2400), settled = largestStep (after, 24000, 48000);
+            check (steady > 0.0f && switching < 2.0f * std::max (steady, settled),
+                   fmt ("Diffuse switched off under a held note: the largest step between samples is %.4f while it fades (%.4f before, %.4f after)",
+                        (double) switching, (double) steady, (double) settled));
+        }
     }
 
     void testStereo()
@@ -3116,7 +3260,7 @@ namespace
         }
 
         {
-            // Width on a rich note at the key's own pitch.
+            // Width on a rich note at the key's own pitch (the loop repeats every note period, Pitch Lock on or off).
             const auto source = harmonicInput (144000, 220.0, 8, 0.03);
             auto run = [&] (float width, bool lock, std::vector<float>& right)
             {
@@ -3139,6 +3283,106 @@ namespace
                        fmt ("Width 100%%, Pitch Lock %s: left + right is what it was (max difference %g), left and right are %+.2f dB apart and %.2f alike",
                             lock ? "on" : "off", (double) monoDifference, balance, alike));
             }
+        }
+
+        {
+            // Width with Pitch Lock off on a loop that does not repeat every note period, which is the
+            // usual way to play it: A4 over a 220 Hz tone at Grain 2, so the loop is one period of the
+            // source. It must widen, not push the sound to one side. With Hollow up as well.
+            const auto source = harmonicInput (144000, 220.0, 8, 0.03);
+            auto run = [&] (float width, float hollow, std::vector<float>& right)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::pitchLock, 0.0f);
+                h.set (ParamID::grainCycles, 2.0f);
+                h.set (ParamID::hollow, hollow);
+                h.set (ParamID::width, width);
+                return play (h, source, { keyDown (24000, 69) }, -1.0, 120.0, &right);
+            };
+            for (const float hollow : { 0.0f, 100.0f })
+            {
+                std::vector<float> narrowRight, wideRight;
+                const auto narrow = run (0.0f, hollow, narrowRight), wide = run (100.0f, hollow, wideRight);
+                float monoDifference = 0.0f;
+                for (size_t i = 0; i < wide.size(); ++i)
+                    monoDifference = std::max (monoDifference, std::abs ((wide[i] + wideRight[i]) - (narrow[i] + narrowRight[i])));
+                const double balance = rmsDb (wide, 60000, 140000) - rmsDb (wideRight, 60000, 140000);
+                const double alike = correlation (wide, wideRight, 60000, 140000);
+                check (monoDifference < 1.0e-4f && std::abs (balance) < 0.3 && alike < 0.9,
+                       fmt ("Width 100%%, Pitch Lock off, a loop two note periods long, Hollow %.0f%%: left + right is what it was (max difference %g), left and right are %+.2f dB apart and %.2f alike",
+                            (double) hollow, (double) monoDifference, balance, alike));
+            }
+        }
+
+        {
+            // Pitch Lock switched on under a held note with Width up: the widening changes over with
+            // the sound (10 ms), not in one sample. The step from the last sample before the switch to
+            // the first after it is looked at by itself.
+            const auto source = harmonicInput (96000, 220.0, 8, 0.03);
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::pitchLock, 0.0f);
+            h.set (ParamID::grainCycles, 2.0f);
+            h.set (ParamID::width, 100.0f);
+            const std::vector<float> head (source.begin(), source.begin() + 48000), tail (source.begin() + 48000, source.end());
+            const auto before = play (h, head, { keyDown (24000, 69) });
+            h.set (ParamID::pitchLock, 1.0f);
+            const auto after = play (h, tail, {});
+            const float steady = largestStep (before, 40000, 48000), settled = largestStep (after, 24000, 48000);
+            const float atSwitch = std::abs (after[0] - before[47999]), switching = largestStep (after, 0, 2400);
+            check (steady > 0.0f && atSwitch < 2.0f * std::max (steady, settled) && switching < 2.0f * std::max (steady, settled),
+                   fmt ("Width 100%%, Pitch Lock switched on under a held note: the step at the switch is %.4f and the largest in the 50 ms after it %.4f (%.4f before, %.4f after)",
+                        (double) atSwitch, (double) switching, (double) steady, (double) settled));
+        }
+
+        {
+            // Width on a note that sits to one side: left plus right is still what it was, and a note
+            // hard to one side stays there.
+            const auto source = harmonicInput (144000, 220.0, 8, 0.03);
+            auto run = [&] (float spread, float width, std::vector<float>& right)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::spread, spread);
+                h.set (ParamID::width, width);
+                return play (h, source, { keyDown (24000, 57) }, -1.0, 120.0, &right);
+            };
+            auto sumDifference = [&] (float spread, float& widened, float& otherSide)
+            {
+                std::vector<float> narrowRight, wideRight;
+                const auto narrow = run (spread, 0.0f, narrowRight), wide = run (spread, 100.0f, wideRight);
+                float difference = 0.0f;
+                for (size_t i = 0; i < wide.size(); ++i)
+                    difference = std::max (difference, std::abs ((wide[i] + wideRight[i]) - (narrow[i] + narrowRight[i])));
+                widened = largestDifference (wide, narrow, 60000, 140000);
+                otherSide = largestSample (wideRight, 0, wideRight.size());
+                return difference;
+            };
+            float widenedHalf = 0.0f, widenedFull = 0.0f, rightHalf = 0.0f, rightFull = 0.0f;
+            const float half = sumDifference (50.0f, widenedHalf, rightHalf), full = sumDifference (100.0f, widenedFull, rightFull);
+            check (half < 1.0e-4f && full < 1.0e-4f && widenedHalf > 0.005f && juce::exactlyEqual (rightFull, 0.0f),
+                   fmt ("Width 100%% on a note placed by Spread: left + right is what it was at Spread 50%% (max difference %g, Width moves the left by %.3f) and at 100%% (%g), where the right stays empty (peak %g)",
+                        (double) half, (double) widenedHalf, (double) full, (double) rightFull));
+        }
+
+        {
+            // Mono, Spread By Pitch: a note that moves to another key slides to its new place (20 ms
+            // from one side to the other). A jump in one sample is a click. C2 sits 7.7 dB to the
+            // left, C4 as far to the right.
+            const auto source = harmonicInput (144000, 130.81, 3, 0.05);
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::mono, 1.0f);
+            h.set (ParamID::spread, 100.0f);
+            h.set (ParamID::spreadMode, (float) (int) SpreadMode::byPitch);
+            std::vector<float> right;
+            const auto left = play (h, source, { keyDown (24000, 48), keyDown (36000, 72) }, -1.0, 120.0, &right);
+            auto sides = [&] (size_t from, size_t to) { return rmsDb (left, from, to) - rmsDb (right, from, to); };
+            const double before = sides (34000, 35900), justAfter = sides (36008, 36056), later = sides (38400, 40000);
+            check (std::abs (before - 7.66) < 0.3 && justAfter > 4.0 && std::abs (later + 7.66) < 0.3,
+                   fmt ("Mono, Spread By Pitch, C2 then C4: left against right is %+.1f dB on the first note, %+.1f dB a millisecond after the second key (still on its way), %+.1f dB 50 ms later",
+                        before, justAfter, later));
         }
 
         {

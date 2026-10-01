@@ -36,6 +36,7 @@ namespace grainlock
             fadeStep = (float) (1.0 / (0.010 * sampleRate));
             followCoeff = (float) (1.0 - std::exp (-(double) tick / (0.030 * sampleRate)));
             tiltCoeff = (float) (1.0 - std::exp (-juce::MathConstants<double>::twoPi * 800.0 / sampleRate));
+            lengthSlew = (float) (1.0 - std::exp (-1.0 / (0.005 * sampleRate)));
 
             // 4x: what the clipper adds above half the sample rate is filtered off instead of folding
             // back as notes that are not in the sound. Polyphase IIR, so there is no latency to report.
@@ -58,6 +59,8 @@ namespace grainlock
                     diffusers[ch][s].phase = 0.21 * (double) (s + 1) + 0.37 * (double) ch;
                 }
 
+            // Nothing is in the path until settle() or a fade puts it there.
+            lowCutFade = highCutFade = tiltFade = driveFade = diffuseFade = 0.0f;
             current = ToneSettings {};
             target = ToneSettings {};
             reset();
@@ -111,15 +114,21 @@ namespace grainlock
                    && lowCutFade <= 0.0f && highCutFade <= 0.0f && tiltFade <= 0.0f && driveFade <= 0.0f && diffuseFade <= 0.0f;
         }
 
-        /** A stage is part-way through switching on or off. */
+        /** A stage is part-way through switching on or off, or a setting in use is not yet the one
+            asked for. (While nothing sounds, settle() puts that right at once.) */
         bool isUnsettled() const noexcept
         {
             auto midway = [] (float fade, bool on) { return on ? fade < 1.0f : fade > 0.0f; };
+            auto behind = [] (float inUse, float asked) { return ! juce::exactlyEqual (inUse, asked); };
             return midway (lowCutFade, lowCutOn()) || midway (highCutFade, highCutOn()) || midway (tiltFade, tiltOn())
-                   || midway (driveFade, driveOn()) || midway (diffuseFade, diffuseOn());
+                   || midway (driveFade, driveOn()) || midway (diffuseFade, diffuseOn())
+                   || behind (current.lowCutHz, target.lowCutHz) || behind (current.highCutHz, target.highCutHz)
+                   || behind (current.tiltDb, target.tiltDb) || behind (current.driveDb, target.driveDb)
+                   || behind (current.diffuse, target.diffuse);
         }
 
-        /** For when nothing is sounding: every stage is simply on or off, and nothing rings. */
+        /** For when nothing is sounding: every stage is simply on or off, at the settings asked for,
+            and nothing rings. */
         void settle() noexcept
         {
             lowCutFade = lowCutOn() ? 1.0f : 0.0f;
@@ -142,7 +151,10 @@ namespace grainlock
                 follow();
             }
 
-            float io[2] = { left, right };
+            // A sample that is not a number (or absurdly large) must never get into a filter: it would
+            // stay there for as long as a note sounds.
+            auto clean = [] (float v) { return std::abs (v) < 1.0e6f ? v : 0.0f; };
+            float io[2] = { clean (left), clean (right) };
 
             // Low Cut
             if (advance (lowCutFade, lowCutOn(), [this] { for (auto& f : lowCut) f = Biquad {}; }))
@@ -191,7 +203,7 @@ namespace grainlock
                 {
                     float x = io[ch];
                     for (size_t s = 0; s < (size_t) numDiffusers; ++s)
-                        x = diffusers[ch][s].process (x, diffuseLength[ch][s], diffuseDepth, diffuseMask);
+                        x = diffusers[ch][s].process (x, diffuseLength[ch][s], diffuseDepth, lengthSlew, diffuseMask);
                     io[ch] += diffuseFade * (x - io[ch]);
                 }
 
@@ -223,8 +235,9 @@ namespace grainlock
             std::vector<float> line;
             int write = 0;
             double phase = 0.0, phaseStep = 0.0;
+            float length = 0.0f;   // the length in use: glides to the one asked for, so a step in Diffuse does not crackle
 
-            float process (float x, float lengthSamples, float depthSamples, int mask) noexcept
+            float process (float x, float lengthSamples, float depthSamples, float slew, int mask) noexcept
             {
                 phase += phaseStep;
                 if (phase >= 1.0)
@@ -234,7 +247,9 @@ namespace grainlock
                 const double p = phase < 0.5 ? phase : phase - 1.0;
                 const float wobble = (float) (16.0 * p * (0.5 - std::abs (p)));
 
-                const float delay = juce::jmax (1.0f, lengthSamples + depthSamples * wobble);
+                length = length < 1.0f ? lengthSamples : length + slew * (lengthSamples - length);
+
+                const float delay = juce::jmax (1.0f, length + depthSamples * wobble);
                 const int whole = (int) delay;
                 const float part = delay - (float) whole;
                 const float a = line[(size_t) ((write - whole) & mask)];
@@ -280,6 +295,7 @@ namespace grainlock
                 {
                     std::fill (stage.line.begin(), stage.line.end(), 0.0f);
                     stage.write = 0;
+                    stage.length = 0.0f;   // starts at the length asked for
                 }
         }
 
@@ -291,7 +307,11 @@ namespace grainlock
             current.highCutHz *= std::pow (target.highCutHz / current.highCutHz, followCoeff);
             current.tiltDb += followCoeff * (target.tiltDb - current.tiltDb);
             current.driveDb += followCoeff * (target.driveDb - current.driveDb);
-            current.diffuse += followCoeff * (target.diffuse - current.diffuse);
+
+            // Diffuse on its way out keeps its lengths: it only fades. (Shrinking them under the fade
+            // would be heard.)
+            if (diffuseOn())
+                current.diffuse += followCoeff * (target.diffuse - current.diffuse);
 
             lowCutCoeffs = design (current.lowCutHz, true);
             highCutCoeffs = design (current.highCutHz, false);
@@ -331,7 +351,7 @@ namespace grainlock
         double sampleRate = 48000.0;
         ToneSettings target, current;
         int countdown = 0;
-        float followCoeff = 0.02f, fadeStep = 0.002f;
+        float followCoeff = 0.02f, fadeStep = 0.002f, lengthSlew = 0.004f;
 
         float lowCutFade = 0.0f, highCutFade = 0.0f, tiltFade = 0.0f, driveFade = 0.0f, diffuseFade = 0.0f;
 

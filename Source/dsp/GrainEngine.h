@@ -340,6 +340,7 @@ namespace grainlock
 
         // Hold: which keys are physically down, the pedal, and the song as this block sees it.
         std::array<juce::uint64, 2> keysDown {};
+        std::array<juce::uint64, 2> keysAtStop {};   // Latch: keys that were down when the song stopped
         bool pedalDown = false;
         int lastNote = -1;              // the last key played, for Poly Glide; -1 = none yet
         bool songRunning = false;       // playing, with a position

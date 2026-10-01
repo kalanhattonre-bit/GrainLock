@@ -290,8 +290,16 @@ namespace grainlock
         void renderState (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
         /** Hollow and Width, on the voice's finished loop sound. Both work from a short memory of what
             the voice has just played (a tenth of a second), so they cost a few reads, not a second and
-            third rendering of every cycle. Call it once per sample, whatever the two are set to. */
-        void applyShape (const VoiceContext& ctx, double frequency, float& left, float& right) noexcept;
+            third rendering of every cycle. Hollow is done to left / right here. Width is handed back:
+            what to add to the left and take from the right once the voice has been placed.
+            repeats: the share of the sound that comes from a loop repeating every note period
+            (1 with Pitch Lock on), for which the memory holds what Width needs; ahead: the rest of
+            it a quarter of a note period from now, from the loop itself (loopAhead).
+            Call it once per sample, whatever the two are set to. */
+        float applyShape (const VoiceContext& ctx, double frequency, float& left, float& right,
+                          float repeats, float ahead) noexcept;
+        /** A play state's loop a quarter of a note period ahead of where it is, left and right as one. */
+        float loopAhead (const PlayState& state, const VoiceContext& ctx) const noexcept;
         bool advance (PlayState& state, double frequency) const noexcept;
         /** firstRenderDelay: 0 when the new state is heard in this same sample, 1 when from the next. */
         void beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source, double firstRenderDelay) noexcept;
@@ -351,6 +359,7 @@ namespace grainlock
         double driftStep = 0.0;             // cycles per sample of the pitch one
         float driftSemitones = 0.0f;
         float place = 0.0f, placeLeft = 1.0f, placeRight = 1.0f;   // -1 = left, 1 = right, and the gains for it
+        float placeStep = 0.002f;            // the furthest a sounding voice's place moves in one sample
         bool offCentre = false;              // a place other than the centre is in use
 
         // Hollow and Width: the last tenth of a second of this voice's own loop sound.
