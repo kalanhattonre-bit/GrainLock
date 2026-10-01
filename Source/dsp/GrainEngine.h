@@ -60,6 +60,13 @@ namespace grainlock
         int envGrain = 0;            // cycles
         bool tapeStop = false;
 
+        // When a note grabs
+        bool grabAtKey = false;      // the loop region starts at the key instead of ending before it
+        float waitMs = 0.0f;
+        int waitSync = 0;            // index into grabSyncChoices(); 0 = the ms knob
+        int offsetSync = 0;
+        int refreshSync = 0;         // index into lfoSyncChoices(); 0 = the ms knob
+
         // Keyboard
         int bendUp = 2, bendDown = 2;    // semitones
         float vibRateHz = 5.5f;
@@ -127,6 +134,26 @@ namespace grainlock
         bool anyVoiceEngaged() const noexcept;
         void restartNoteLfos() noexcept;
         void updateBendTarget() noexcept;
+
+        /** The only place input reaches the memory: also advances the sample clock. */
+        void pushInput (float left, float right) noexcept;
+
+        /** A grab that has been asked for and may have to wait (Wait, At Key). */
+        struct PendingGrab
+        {
+            bool active = false;
+            juce::int64 planEnd = 0;   // where the slice ends, on the sample clock (may lie before the key)
+            juce::int64 dueTime = 0;   // the first moment the grab can happen: max(key, planEnd)
+            bool placed = false;       // the spot was chosen on purpose (At Key): no loop-point nudge
+        };
+
+        /** Works out when a key pressed now grabs. Returns true when that is right away. */
+        bool planGrab (int slot, int note, const VoiceContext& ctx, PendingGrab& plan) noexcept;
+        void startArmedVoice (int slot, const VoiceContext& ctx) noexcept;
+        void fireGrab (int slot, const VoiceContext& ctx, const PendingGrab& plan) noexcept;
+        void fireMonoKey (const VoiceContext& ctx) noexcept;
+        void servePendingGrabs (const VoiceContext& ctx) noexcept;
+        void clearPendingGrabs() noexcept;
         void publishScope (const VoiceContext& ctx) noexcept;
 
         void stackRemove (int note) noexcept;
@@ -159,7 +186,23 @@ namespace grainlock
         // Values fixed for the current block.
         EngineParams block;
         int offsetSamples = 0;
+        int waitSamples = 0;
+        int liveLagSamples = 0;         // where a Live re-grab ends: Offset less the Wait already served
         double refreshSamples = 1200.0;
+        bool refreshSynced = false;
+
+        juce::int64 sampleClock = 0;    // input samples pushed since prepare / reset
+        std::array<PendingGrab, numVoiceSlots> pendingGrabs {};
+
+        // Mono: a key whose grab lies in the future is acted on at that time, not at the key, so the
+        // sounding note carries on unchanged until then.
+        struct MonoKey
+        {
+            bool active = false;
+            int note = 60;
+            float level = 1.0f;
+            PendingGrab grab;
+        } monoKey;
         std::array<double, numLfos> lfoIncrement {};
         std::array<bool, numLfos> lfoSynced {};
         float captureRatioMax = 1.0f;

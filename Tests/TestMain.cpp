@@ -1444,6 +1444,7 @@ namespace
                 { ParamID::pitchLfoShape, 6 }, { ParamID::formantLfoShape, 6 }, { ParamID::grainLfoShape, 6 },
                 { ParamID::pitchLfoTrig, 4 }, { ParamID::formantLfoTrig, 4 }, { ParamID::grainLfoTrig, 4 },
                 { ParamID::wheelDest, 5 }, { ParamID::touchDest, 5 }, { ParamID::exprDest, 5 },
+                { ParamID::grabAt, 2 }, { ParamID::waitSync, 10 }, { ParamID::offsetSync, 10 }, { ParamID::refreshSync, 13 },
             };
             int wrong = 0, choices = 0;
             for (const auto& [id, count] : lists)
@@ -1791,6 +1792,234 @@ namespace
             for (size_t i = 0; i < still.size(); ++i)
                 difference = std::max (difference, std::abs (wheel[i] - still[i]));
             check (juce::exactlyEqual (difference, 0.0f), fmt ("a 0.2 project with the mod wheel moving: identical to the same notes without it (max difference %g)", (double) difference));
+        }
+    }
+
+    //==========================================================================
+    // 0.3 stage 3: when a note grabs
+
+    float largestDifference (const std::vector<float>& a, const std::vector<float>& b, size_t from, size_t to)
+    {
+        float m = 0.0f;
+        for (size_t i = from; i < to && i < a.size() && i < b.size(); ++i)
+            m = std::max (m, std::abs (a[i] - b[i]));
+        return m;
+    }
+
+    float largestSample (const std::vector<float>& x, size_t from, size_t to)
+    {
+        float m = 0.0f;
+        for (size_t i = from; i < to && i < x.size(); ++i)
+            m = std::max (m, std::abs (x[i]));
+        return m;
+    }
+
+    void testWaitAndAtKey()
+    {
+        section ("0.3 G01: Wait and At Key put the grab after the key; a waiting note is silent and still plays its length");
+
+        const auto input = noiseInput (144000, 21, 0.25f);
+
+        {
+            // A waited note is exactly the note a later key would have played (Mix 100 with Dry When
+            // Idle off, so the output is the frozen sound alone).
+            auto run = [&input] (juce::int64 key, float waitMs, float offsetMs)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::wait, waitMs);
+                h.set (ParamID::offset, offsetMs);
+                return play (h, input, { keyDown (key, 60) });
+            };
+            const auto waited = run (24000, 100.0f, 0.0f), later = run (28800, 0.0f, 0.0f);
+            check (juce::exactlyEqual (largestSample (waited, 0, 28800), 0.0f)
+                       && juce::exactlyEqual (largestDifference (waited, later, 28800, waited.size()), 0.0f)
+                       && largestSample (waited, 30000, 60000) > 0.01f,
+                   fmt ("Wait 100 ms: silent until the grab (peak %g), then identical to a key pressed 100 ms later (max difference %g)",
+                        (double) largestSample (waited, 0, 28800), (double) largestDifference (waited, later, 28800, waited.size())));
+
+            // Offset longer than the Wait: nothing to wait for; the slice just ends that much less far back.
+            const auto both = run (24000, 100.0f, 300.0f), offsetOnly = run (24000, 0.0f, 200.0f);
+            check (juce::exactlyEqual (largestDifference (both, offsetOnly, 0, both.size()), 0.0f) && largestSample (both, 24000, 60000) > 0.01f,
+                   fmt ("Wait 100 ms with Offset 300 ms is Offset 200 ms: max difference %g", (double) largestDifference (both, offsetOnly, 0, both.size())));
+        }
+
+        {
+            // At Key: the input is silent until the key and a steady tone after it. Before Key freezes
+            // the silence; At Key waits for one loop region of tone and freezes that.
+            auto tone = harmonicInput (144000, 220.0, 8, 0.03);
+            for (size_t i = 0; i < 48000; ++i)
+                tone[i] = 0.0f;
+            auto run = [&tone] (juce::int64 key, bool atKey, int block)
+            {
+                Harness h (48000.0, block);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::grainCycles, 8.0f);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::grabAt, atKey ? 1.0f : 0.0f);
+                return play (h, tone, { keyDown (key, 57) });
+            };
+            const auto before = run (48000, false, 256), at = run (48000, true, 256), midTone = run (96000, false, 256);
+            const double atLevel = rmsDb (at, 60000, 84000), reference = rmsDb (midTone, 108000, 132000);
+            size_t firstSound = 0;
+            while (firstSound < at.size() && juce::exactlyEqual (at[firstSound], 0.0f))
+                ++firstSound;
+            const int expected = 48000 + (int) std::ceil (8.1 * 48000.0 / 220.0);   // Smooth is 10%
+            check (juce::exactlyEqual (largestSample (before, 0, before.size()), 0.0f) && std::abs (atLevel - reference) <= 1.0,
+                   fmt ("a key pressed where a tone starts: Before Key freezes silence, At Key is within %+.2f dB of a note pressed mid-tone", atLevel - reference));
+            check (std::abs ((int) firstSound - expected) <= 2,
+                   fmt ("At Key, Grain 8 on A2: the note starts %d samples after the key (eight cycles of the note and the seam = %d)", (int) firstSound - 48000, expected - 48000));
+
+            const auto bigBlocks = run (48000, true, 4096), smallBlocks = run (48000, true, 64);
+            check (juce::exactlyEqual (largestDifference (bigBlocks, smallBlocks, 0, bigBlocks.size()), 0.0f),
+                   "At Key: the same output at blocks of 64 and 4096");
+        }
+
+        {
+            // A tap shorter than the wait, over input hotter than the limiter's ceiling: the dry is
+            // untouched while the note waits, the note then sounds for as long as the key was down,
+            // and the output is the dry again afterwards.
+            const auto hot = noiseInput (96000, 22, 0.95f);
+            Harness h (48000.0, 256);
+            h.set (ParamID::wait, 100.0f);
+            h.set (ParamID::release, 30.0f);
+            const auto out = play (h, hot, { keyDown (24000, 60), keyUp (24000 + 2880, 60) });
+            const float waiting = largestDifference (out, hot, 0, 28800);
+            const float sounding = largestDifference (out, hot, 28800 + 480, 28800 + 2880);
+            const float after = largestDifference (out, hot, 28800 + 2880 + 1440 + 24000, out.size());
+            check (juce::exactlyEqual (waiting, 0.0f) && sounding > 0.05f && juce::exactlyEqual (after, 0.0f),
+                   fmt ("a 60 ms tap with Wait 100 ms: dry untouched while it waits (%g), the note plays (%.2f), dry again afterwards (%g)",
+                        (double) waiting, (double) sounding, (double) after));
+
+            // And it is, to the sample, the note the same tap would have played 100 ms later.
+            Harness plain (48000.0, 256);
+            plain.set (ParamID::release, 30.0f);
+            const auto reference = play (plain, hot, { keyDown (28800, 60), keyUp (28800 + 2880, 60) });
+            check (juce::exactlyEqual (largestDifference (out, reference, 0, out.size()), 0.0f),
+                   fmt ("the tapped note keeps its length: identical to the same tap made 100 ms later (max difference %g)",
+                        (double) largestDifference (out, reference, 0, out.size())));
+        }
+
+        {
+            // Wait as a note value: 1/16 at 120 BPM is 125 ms.
+            auto run = [&input] (float waitMs, float waitSync)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::wait, waitMs);
+                h.set (ParamID::waitSync, waitSync);
+                return play (h, input, { keyDown (24000, 60) }, 0.0, 120.0);
+            };
+            const auto synced = run (0.0f, 3.0f), typed = run (125.0f, 0.0f);
+            check (juce::exactlyEqual (largestDifference (synced, typed, 0, synced.size()), 0.0f) && largestSample (synced, 31000, 60000) > 0.01f
+                       && juce::exactlyEqual (largestSample (synced, 0, 30000), 0.0f),
+                   fmt ("Wait Sync 1/16 at 120 BPM is Wait 125 ms (max difference %g)", (double) largestDifference (synced, typed, 0, synced.size())));
+        }
+
+        {
+            // Refresh as a note value: a Live note re-grabs on its own quarter notes. The input is
+            // silent until 1.25 beats into the note, so the first re-grab that can hear anything is the
+            // second one, two beats in. (With Refresh in ms the note picks the sound up at once.)
+            std::vector<float> late = noiseInput (144000, 24, 0.25f);
+            for (size_t i = 0; i < 54000; ++i)
+                late[i] = 0.0f;
+            auto firstSoundAt = [&late] (float refreshSync)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::refreshSync, refreshSync);
+                const auto out = play (h, late, { keyDown (24000, 57) }, 0.0, 120.0);
+                size_t first = 0;
+                while (first < out.size() && juce::exactlyEqual (out[first], 0.0f))
+                    ++first;
+                return (int) first;
+            };
+            const int synced = firstSoundAt (5.0f), unsynced = firstSoundAt (0.0f);
+            check (synced >= 72000 - 2 && synced <= 72000 + 480 && unsynced >= 54000 && unsynced < 57000,
+                   fmt ("Refresh Sync 1/4 at 120 BPM: sound that starts 1.25 beats into a note is picked up at beat 2 (%+d samples); with Refresh 25 ms, %d ms after it starts",
+                        synced - 72000, (unsynced - 54000) / 48));
+        }
+
+        {
+            // Nine taps inside a long wait: every one is heard later, and none is left hanging.
+            Harness h (48000.0, 256);
+            h.set (ParamID::wait, 500.0f);
+            h.set (ParamID::release, 30.0f);
+            std::vector<ScriptEvent> events;
+            for (int k = 0; k < 9; ++k)
+            {
+                events.push_back (keyDown (12000 + k * 4800, 48 + 2 * k));
+                events.push_back (keyUp (12000 + k * 4800 + 2880, 48 + 2 * k));
+            }
+            const auto longInput = noiseInput (240000, 23, 0.25f);
+            const auto out = play (h, longInput, events);
+            int heard = 0;
+            for (int k = 0; k < 9; ++k)
+                heard += largestDifference (out, longInput, (size_t) (36000 + k * 4800 + 480), (size_t) (36000 + k * 4800 + 2880)) > 0.02f ? 1 : 0;
+            const float after = largestDifference (out, longInput, 36000 + 8 * 4800 + 2880 + 96000, out.size());
+            check (heard == 9 && juce::exactlyEqual (after, 0.0f),
+                   fmt ("nine 60 ms taps with Wait 500 ms: %d heard half a second later, and the dry is untouched two seconds on (%g)", heard, (double) after));
+        }
+
+        {
+            // "All notes off" during the wait: the note never plays.
+            Harness h (48000.0, 256);
+            h.set (ParamID::wait, 100.0f);
+            const auto out = play (h, input, { keyDown (24000, 60), controller (26000, 123, 0) });
+            check (juce::exactlyEqual (largestDifference (out, input, 0, out.size()), 0.0f),
+                   fmt ("all-notes-off during the wait: no note follows (max difference from the dry %g)", (double) largestDifference (out, input, 0, out.size())));
+        }
+
+        {
+            // Mono with Wait 300 ms. A legato move keeps the old note, unchanged, until the new key's
+            // grab is due; and a first note that never sounded is replaced by the next key.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::mono, 1.0f);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::wait, 300.0f);
+            const auto out = play (h, input, { keyDown (24000, 57), keyDown (60000, 64) });
+            const double held = centsBetween (pitchAt (out, 62000), noteHz (57)), moved = centsBetween (pitchAt (out, 80000), noteHz (64));
+            check (std::abs (held) <= 5.0 && std::abs (moved) <= 5.0,
+                   fmt ("mono legato A2 to E3 with Wait 300 ms: still A2 during the wait (%+.1f cents), E3 after it (%+.1f cents)", held, moved));
+
+            Harness tap (48000.0, 256);
+            tap.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            tap.set (ParamID::mono, 1.0f);
+            tap.set (ParamID::dryWhenIdle, 0.0f);
+            tap.set (ParamID::wait, 100.0f);
+            const auto replaced = play (tap, input, { keyDown (24000, 57), keyUp (25440, 57), keyDown (26880, 64) });
+            const double pitch = centsBetween (pitchAt (replaced, 40000), noteHz (64));
+            check (juce::exactlyEqual (largestSample (replaced, 0, 26880 + 4800), 0.0f) && std::abs (pitch) <= 5.0,
+                   fmt ("mono: a tapped A2 replaced by E3 during its wait never sounds; E3 starts at its own time (%+.1f cents)", pitch));
+        }
+
+        {
+            // A synced Offset lands on the beat: a click placed just inside the end of the slice is
+            // frozen, one placed just after it is not. At 40 BPM a quarter note (1.5 s) is too long and
+            // is halved to an eighth (0.75 s), still on the grid.
+            auto frozenPeak = [] (double bpm, int offsetSamples, int clickAfterEnd)
+            {
+                std::vector<float> click (144000, 0.0f);
+                const juce::int64 key = 96000;
+                click[(size_t) (key - offsetSamples + clickAfterEnd)] = 0.8f;
+                Harness h (48000.0, 256);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::grainCycles, 1.0f);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::offsetSync, 7.0f);   // 1/4
+                const auto out = play (h, click, { keyDown (key, 57) }, 0.0, bpm);
+                return largestSample (out, (size_t) key + 4800, out.size());
+            };
+            const int quarterAt95 = (int) std::lround (60.0 / 95.0 * 48000.0), eighthAt40 = (int) std::lround (0.5 * 60.0 / 40.0 * 48000.0);
+            const float inside = frozenPeak (95.0, quarterAt95, -20), outside = frozenPeak (95.0, quarterAt95, 20);
+            const float insideHalved = frozenPeak (40.0, eighthAt40, -20), outsideHalved = frozenPeak (40.0, eighthAt40, 20);
+            check (inside > 0.05f && juce::exactlyEqual (outside, 0.0f),
+                   fmt ("Offset 1/4 at 95 BPM: the slice ends %d samples back (a click just inside is frozen: %.2f; just after: %g)", quarterAt95, (double) inside, (double) outside));
+            check (insideHalved > 0.05f && juce::exactlyEqual (outsideHalved, 0.0f),
+                   fmt ("Offset 1/4 at 40 BPM is halved to 1/8: the slice ends %d samples back (inside %.2f, after %g)", eighthAt40, (double) insideHalved, (double) outsideHalved));
         }
     }
 
@@ -2270,6 +2499,10 @@ int main (int argc, char** argv)
         testLfoTriggerModes();
         testNoteEnvelope();
         testKeyboardSources();
+    }
+    if (wants ("v03c"))
+    {
+        testWaitAndAtKey();
     }
     if (wants ("reference"))
     {

@@ -80,6 +80,13 @@ namespace grainlock::ParamID
     inline constexpr const char* exprDest  = "exprDest";
     inline constexpr const char* exprAmt   = "exprAmt";
 
+    // 0.3: when a note grabs its audio.
+    inline constexpr const char* grabAt      = "grabAt";
+    inline constexpr const char* wait        = "wait";
+    inline constexpr const char* waitSync    = "waitSync";
+    inline constexpr const char* offsetSync  = "offsetSync";
+    inline constexpr const char* refreshSync = "refreshSync";
+
     /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
     inline constexpr const char* bypass      = "bypass";
 
@@ -97,7 +104,8 @@ namespace grainlock::ParamID
         grainLfoTrig, grainLfoFade, grainLfoPhase, grainLfoInvert,
         envAttack, envDecay, envPitch, envFormant, envGrain, tapeStop,
         bendUp, bendDown, vibRate, vibDepth,
-        wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt
+        wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt,
+        grabAt, wait, waitSync, offsetSync, refreshSync
     };
 
     /** The parameter IDs of one LFO. */
@@ -180,6 +188,19 @@ namespace grainlock
     /** Choice labels for the LFO shape parameters, in LfoShape order: the one list every user shares. */
     const juce::StringArray& lfoShapeChoices();
 
+    /** Choice labels for Offset Sync and Wait Sync. Index 0 is free (the ms knob); the rest are note
+        values from 1/32 to 1/1. A value too long for its control is halved until it fits, so the grab
+        stays on the grid. */
+    const juce::StringArray& grabSyncChoices();
+
+    /** Length in quarter-note beats of a grabSyncChoices() index, or 0 for free. */
+    double grabSyncBeats (int syncIndex) noexcept;
+
+    // The longest a synced Offset may reach back and a synced Wait may wait, in seconds. The input
+    // memory is this Offset plus two seconds, at any sample rate.
+    inline constexpr double maxOffsetSeconds = 1.2;
+    inline constexpr double maxWaitSeconds   = 2.0;
+
     /** Length of one LFO cycle in quarter-note beats for a sync index, or 0 for free-running. */
     double lfoSyncBeats (int syncIndex) noexcept;
 
@@ -243,6 +264,7 @@ namespace grainlock
 
         std::atomic<float> *envAttack, *envDecay, *envPitch, *envFormant, *envGrain, *tapeStop;
         std::atomic<float> *bendUp, *bendDown, *vibRate, *vibDepth;
+        std::atomic<float> *grabAt, *wait, *waitSync, *offsetSync, *refreshSync;
 
         std::atomic<float>* mix;
         std::atomic<float>* dryWhenIdle;
