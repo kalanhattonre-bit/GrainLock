@@ -41,7 +41,23 @@ namespace grainlock
         for (int i = 0; i < numLfos; ++i)
             ownLfos[(size_t) i].reset (lfoSeed (i));
         nudgeHistory = juce::nextPowerOfTwo ((int) std::ceil (2.0 * sampleRate) + 64);
+
+        const int shapeLength = juce::nextPowerOfTwo ((int) std::ceil (0.1 * sampleRate) + 8);
+        for (auto& channel : shapeLine)
+            channel.assign ((size_t) shapeLength, 0.0f);
+        shapeMask = shapeLength - 1;
+        shapeWrite = 0;
+        shapeFade = (float) (0.003 * sampleRate);
         kill();
+    }
+
+    void GrainVoice::setIndex (int index) noexcept
+    {
+        driftLfos[0].reset (lfoSeed (40 + 2 * index));
+        driftLfos[1].reset (lfoSeed (41 + 2 * index));
+
+        // A different pace for each voice as well, so two notes never wander together.
+        driftStep = (0.19 + 0.031 * (double) (index % 7)) / sampleRate;
     }
 
     double GrainVoice::frequencyFor (double semitones) const noexcept
@@ -152,11 +168,61 @@ namespace grainlock
         basePitch = glide + shared;
         baseTargetPitch = pitch.target + shared;
 
+        // Drift: each voice wanders a little by itself, up to 12 cents and a third of the way to one side.
+        float wander = 0.0f;
+        if (ctx.drift > 0.0f)
+        {
+            if (advance)
+            {
+                driftSemitones = 0.12f * driftLfos[0].next (driftStep, LfoShape::random);
+                wander = 0.35f * driftLfos[1].next (driftStep * 0.71, LfoShape::random);
+            }
+            else
+            {
+                driftSemitones = 0.12f * driftLfos[0].peek (LfoShape::random);
+                wander = 0.35f * driftLfos[1].peek (LfoShape::random);
+            }
+        }
+
+        // Where the voice sits. In the centre both gains are exactly 1; a note hard to one side is
+        // 3 dB up there, so the level of a spread chord stays what it was.
+        offCentre = ctx.spread > 0.0f || ctx.drift > 0.0f;
+        if (offCentre)
+        {
+            float home = 0.0f;
+            switch (ctx.spreadMode)
+            {
+                case SpreadMode::alternate: home = (startOrder & 1u) != 0 ? -1.0f : 1.0f; break;
+                case SpreadMode::byPitch:   home = juce::jlimit (-1.0f, 1.0f, (float) (note - 60) / 24.0f); break;
+                case SpreadMode::random:
+                {
+                    juce::uint64 z = startOrder * 0x9e3779b97f4a7c15ull + (juce::uint64) note;
+                    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+                    z ^= z >> 27;
+                    home = (float) ((double) (z >> 40) / 8388608.0 - 1.0);
+                    break;
+                }
+            }
+
+            const float wanted = juce::jlimit (-1.0f, 1.0f, ctx.spread * home + ctx.drift * wander);
+            if (! juce::exactlyEqual (wanted, place))
+            {
+                place = wanted;
+                const float angle = (place + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
+                placeLeft = 1.41421356f * std::cos (angle);
+                placeRight = 1.41421356f * std::sin (angle);
+                if (std::abs (placeLeft) < 1.0e-6f)  placeLeft = 0.0f;    // hard right: cos (pi / 2) is not quite 0 in floats
+                if (std::abs (placeRight) < 1.0e-6f) placeRight = 0.0f;
+            }
+        }
+
         // Sounding pitch: only the loop rate follows it, so these move pitch and tone together.
-        const double sounding = basePitch
-                                + (double) (mods.envPitch * noteEnv)
-                                + (double) (mods.vibratoDepthSemitones * vibratoDepth * ctx.vibrato)
-                                + tapeSemitones;
+        double sounding = basePitch
+                          + (double) (mods.envPitch * noteEnv)
+                          + (double) (mods.vibratoDepthSemitones * vibratoDepth * ctx.vibrato)
+                          + tapeSemitones;
+        if (ctx.drift > 0.0f)
+            sounding += (double) (ctx.drift * driftSemitones);
         soundingFrequency = frequencyFor (sounding);
 
         // Formant and cycle count: the context's own numbers unless this voice adds something.
@@ -555,6 +621,7 @@ namespace grainlock
     void GrainVoice::beginSounding (const VoiceContext& ctx, const CaptureSource& source, bool placed, int atKeyPart) noexcept
     {
         waiting = false;
+        shapeAge = 0;
         atKeySamples = juce::jmax (0, atKeyPart);
         keyGrabPlaced = placed;
         refreshClockStale = false;
@@ -825,6 +892,63 @@ namespace grainlock
                 left += seamIn * a;
                 right += seamIn * b;
             }
+        }
+    }
+
+    void GrainVoice::applyShape (const VoiceContext& ctx, double frequency, float& left, float& right) noexcept
+    {
+        // Always kept, so the controls have real history to work from the moment they are turned up.
+        const int at = shapeWrite;
+        shapeLine[0][(size_t) at] = left;
+        shapeLine[1][(size_t) at] = right;
+        shapeWrite = (shapeWrite + 1) & shapeMask;
+        if (shapeAge < shapeMask)
+            ++shapeAge;
+
+        const float h = ctx.hollow, w = ctx.width;
+        if (! (h > 0.0f || w > 0.0f))
+            return;
+
+        // One note period in samples, as far as the line reaches (it holds notes down to about 8 Hz).
+        const double period = juce::jlimit (2.0, (double) (shapeMask - 4) / 0.75, sampleRate / frequency);
+
+        // The voice's sound that many samples ago, and how far it can be trusted: 0 while the line
+        // still holds the note before, fading to 1 once this note has reached that far back.
+        auto earlier = [this, at] (double delay, float& l, float& r)
+        {
+            const int whole = (int) delay;
+            const float part = (float) (delay - (double) whole);
+            const auto i0 = (size_t) ((at - whole) & shapeMask), i1 = (size_t) ((at - whole - 1) & shapeMask);
+            l = shapeLine[0][i0] + part * (shapeLine[0][i1] - shapeLine[0][i0]);
+            r = shapeLine[1][i0] + part * (shapeLine[1][i1] - shapeLine[1][i0]);
+            return juce::jlimit (0.0f, 1.0f, ((float) shapeAge - (float) delay) / shapeFade);
+        };
+
+        // Hollow: the loop minus itself half a note period earlier. The even harmonics of the note
+        // thin out, the odd ones grow, and the level is brought back to where it was.
+        float hollow = 0.0f, scale = 1.0f;
+        if (h > 0.0f)
+        {
+            float l = 0.0f, r = 0.0f;
+            hollow = h * earlier (0.5 * period, l, r);
+            scale = 1.0f / std::sqrt (1.0f + hollow * hollow);
+            left = (left - hollow * l) * scale;
+            right = (right - hollow * r) * scale;
+        }
+
+        // Width: the difference between the loop a quarter and three quarters of a period earlier,
+        // added to one side and taken from the other. Left plus right is exactly what it was. On a
+        // sound that repeats every note period (always, with Pitch Lock on) neither side gets louder
+        // than the other.
+        if (w > 0.0f)
+        {
+            float al = 0.0f, ar = 0.0f, bl = 0.0f, br = 0.0f;
+            const float trustA = earlier (0.25 * period, al, ar);
+            const float trustB = earlier (0.75 * period, bl, br);
+            const float side = 0.25f * ((bl + br) - (al + ar)) * (1.0f + hollow) * scale   // Hollow leaves this part of the sound that much stronger
+                               * juce::jmin (trustA, trustB);
+            left += w * side;
+            right -= w * side;
         }
     }
 
@@ -1140,6 +1264,9 @@ namespace grainlock
                 transition.active = false;
         }
 
+        // Hollow and Width shape what is heard. What Feedback sends back is the loop before them.
+        applyShape (ctx, frequency, left, right);
+
         const bool wrapped = advance (states[(size_t) current], frequency);
         samplesSinceCapture += 1.0;
         ++sinceMeasure;
@@ -1208,8 +1335,16 @@ namespace grainlock
             kill();
         }
 
-        outLeft += left * gain;
-        outRight += right * gain;
+        if (offCentre)
+        {
+            outLeft += left * gain * placeLeft;
+            outRight += right * gain * placeRight;
+        }
+        else
+        {
+            outLeft += left * gain;
+            outRight += right * gain;
+        }
 
         if (ctx.feedbackOn)
         {
@@ -1228,6 +1363,20 @@ namespace grainlock
             float left = 0.0f, right = 0.0f;
             renderState (shape, ctx, left, right);
             dest[i] = 0.5f * (left + right);
+        }
+
+        // Hollow as it is heard: the loop minus itself half a note period earlier. (Width does not
+        // show: left and right are drawn as one line, and it leaves their sum alone.)
+        if (ctx.hollow > 0.0f && numPoints >= 4 && numPoints <= 1024)
+        {
+            std::array<float, 1024> plain;
+            for (int i = 0; i < numPoints; ++i)
+                plain[(size_t) i] = dest[i];
+
+            const int half = juce::jmax (1, numPoints / (2 * (shape.lockOn ? 1 : juce::jmax (1, shape.taps))));
+            const float h = ctx.hollow, scale = 1.0f / std::sqrt (1.0f + h * h);
+            for (int i = 0; i < numPoints; ++i)
+                dest[i] = (plain[(size_t) i] - h * plain[(size_t) ((i - half + numPoints) % numPoints)]) * scale;
         }
         return shape.lockOn ? 1 : shape.taps;
     }

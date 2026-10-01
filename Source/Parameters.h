@@ -106,6 +106,18 @@ namespace grainlock::ParamID
     inline constexpr const char* polyGlide    = "polyGlide";
     inline constexpr const char* voices       = "voices";
 
+    // 0.3: tone and stereo, on the frozen sound only.
+    inline constexpr const char* lowCut     = "lowCut";
+    inline constexpr const char* highCut    = "highCut";
+    inline constexpr const char* tilt       = "tilt";
+    inline constexpr const char* drive      = "drive";
+    inline constexpr const char* hollow     = "hollow";
+    inline constexpr const char* diffuse    = "diffuse";
+    inline constexpr const char* spread     = "spread";
+    inline constexpr const char* spreadMode = "spreadMode";
+    inline constexpr const char* width      = "width";
+    inline constexpr const char* drift      = "drift";
+
     /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
     inline constexpr const char* bypass      = "bypass";
 
@@ -126,7 +138,8 @@ namespace grainlock::ParamID
         wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt,
         grabAt, wait, waitSync, offsetSync, refreshSync,
         snap, threshold, maxWait, skipHiss, gate, gridGrabs, skipChance, feedback,
-        sustainPedal, holdMode, holdTime, glideLegato, glideRate, polyGlide, voices
+        sustainPedal, holdMode, holdTime, glideLegato, glideRate, polyGlide, voices,
+        lowCut, highCut, tilt, drive, hollow, diffuse, spread, spreadMode, width, drift
     };
 
     /** The parameter IDs of one LFO. */
@@ -190,6 +203,12 @@ namespace grainlock
         key, but on the next grid line. full: the note's own length, whatever the key does. */
     enum class HoldMode    { normal = 0, latch, onGrid, full };
     inline constexpr int numHoldModes = 4;
+
+    /** Where Spread puts each note. alternate: one left, the next right. byPitch: low notes left, high
+        notes right (two octaves either side of C3). random: anywhere, the same place for the same note
+        in the same phrase. */
+    enum class SpreadMode  { alternate = 0, byPitch, random };
+    inline constexpr int numSpreadModes = 3;
 
     /** What each LFO moves. Also the index of that LFO everywhere (ParamID::lfo, EngineParams::lfos, ...). */
     enum class LfoTarget   { pitch = 0, formant, grainCycles };
@@ -302,6 +321,7 @@ namespace grainlock
         std::atomic<float> *grabAt, *wait, *waitSync, *offsetSync, *refreshSync;
         std::atomic<float> *snap, *threshold, *maxWait, *skipHiss, *gate, *gridGrabs, *skipChance, *feedback;
         std::atomic<float> *sustainPedal, *holdMode, *holdTime, *glideLegato, *glideRate, *polyGlide, *voices;
+        std::atomic<float> *lowCut, *highCut, *tilt, *drive, *hollow, *diffuse, *spread, *spreadMode, *width, *drift;
 
         std::atomic<float>* mix;
         std::atomic<float>* dryWhenIdle;

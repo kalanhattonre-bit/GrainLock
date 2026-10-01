@@ -82,6 +82,13 @@ namespace grainlock
         float feedbackLag = 0.0f;       // how many samples late the feedback path's low pass hands audio back
 
         double beatsPerSample = 0.0;    // the song's tempo, for a note that ends after a number of beats
+
+        // Tone and stereo, per voice. All 0..1; at 0 the voice does none of it.
+        float hollow = 0.0f;            // takes its own loop, half a note period on, away from itself
+        float width = 0.0f;             // adds the loop's "side" to one channel and takes it from the other
+        float spread = 0.0f;            // how far from the centre notes are placed
+        SpreadMode spreadMode = SpreadMode::alternate;
+        float drift = 0.0f;             // slow wander of pitch and place
     };
 
     /** What the voices send back into the input memory (Feedback), summed over one sample. */
@@ -116,6 +123,9 @@ namespace grainlock
     {
     public:
         void prepare (double sampleRate, int grainCapacity);
+
+        /** Which of the engine's voices this is: gives each its own slow Drift. */
+        void setIndex (int index) noexcept;
         void setEnvelopeTimes (float attackMs, float decayMs, float releaseMs) noexcept
         {
             envelope.setTimes (attackMs, decayMs, releaseMs);
@@ -278,6 +288,10 @@ namespace grainlock
         void capture (GrainBuffer& grain, double frequency, const VoiceContext& ctx, const CaptureSource& source,
                       bool nudge = true) noexcept;
         void renderState (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
+        /** Hollow and Width, on the voice's finished loop sound. Both work from a short memory of what
+            the voice has just played (a tenth of a second), so they cost a few reads, not a second and
+            third rendering of every cycle. Call it once per sample, whatever the two are set to. */
+        void applyShape (const VoiceContext& ctx, double frequency, float& left, float& right) noexcept;
         bool advance (PlayState& state, double frequency) const noexcept;
         /** firstRenderDelay: 0 when the new state is heard in this same sample, 1 when from the next. */
         void beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source, double firstRenderDelay) noexcept;
@@ -331,6 +345,19 @@ namespace grainlock
 
         // Per-voice modulation state.
         std::array<Lfo, numLfos> ownLfos;
+
+        // Spread and Drift.
+        std::array<Lfo, 2> driftLfos;       // pitch, place
+        double driftStep = 0.0;             // cycles per sample of the pitch one
+        float driftSemitones = 0.0f;
+        float place = 0.0f, placeLeft = 1.0f, placeRight = 1.0f;   // -1 = left, 1 = right, and the gains for it
+        bool offCentre = false;              // a place other than the centre is in use
+
+        // Hollow and Width: the last tenth of a second of this voice's own loop sound.
+        std::array<std::vector<float>, 2> shapeLine;
+        int shapeMask = 0, shapeWrite = 0;
+        int shapeAge = 0;                   // samples of this note in the line
+        float shapeFade = 144.0f;           // a delayed read fades in over this many samples once the note has reached it
         std::array<float, numLfos> lfoFade {};
         std::array<float, numLfos> lfoSmoothed {};
         EnvStage noteEnvStage = EnvStage::idle;

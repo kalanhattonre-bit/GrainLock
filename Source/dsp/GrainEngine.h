@@ -4,6 +4,7 @@
 #include "Lfo.h"
 #include "ScopeFrame.h"
 #include "SoftLimiter.h"
+#include "ToneChain.h"
 
 namespace grainlock
 {
@@ -85,6 +86,18 @@ namespace grainlock
         bool glidePerOctave = false;          // Glide is the time for one octave
         bool polyGlide = false;               // a new poly note glides in from the last key played
         int voices = 8;
+
+        // Tone and stereo, on the frozen sound only. These defaults are all "off".
+        float lowCutHz = 20.0f;
+        float highCutHz = 20000.0f;
+        float tiltDb = 0.0f;
+        float driveDb = 0.0f;
+        float hollowPercent = 0.0f;
+        float diffusePercent = 0.0f;
+        float spreadPercent = 0.0f;
+        SpreadMode spreadMode = SpreadMode::alternate;
+        float widthPercent = 0.0f;
+        float driftPercent = 0.0f;
 
         // Keyboard
         int bendUp = 2, bendDown = 2;    // semitones
@@ -215,7 +228,7 @@ namespace grainlock
         void clearPendingGrabs() noexcept;
 
         /** The song's grid: tells the Live voices when a line is crossed. */
-        void advanceGrid (const VoiceContext& ctx, int sampleInBlock) noexcept;
+        void advanceGrid (const VoiceContext& ctx, int sample) noexcept;
         /** Works out what the next input sample has added to it in the memory. */
         void updateFeedback (const FeedbackSend& send) noexcept;
         void clearFeedback() noexcept;
@@ -233,6 +246,9 @@ namespace grainlock
         std::array<GrainVoice, numVoiceSlots> voices;
         std::array<Lfo, numLfos> lfos;
         SoftLimiter limiter;
+        ToneChain tone;                 // Low Cut, Drive, Tilt, High Cut, Diffuse on the summed frozen sound
+        int toneTail = 0;               // samples the Tone section may still ring after the last voice
+        juce::SmoothedValue<float> hollow, width, spread, drift;
         ScopeFifo scopeFifo;
 
         // Smoothed continuous controls.

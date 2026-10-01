@@ -13,8 +13,12 @@ namespace grainlock
         ring.prepare ((int) std::ceil ((2.0 + maxOffsetSeconds) * sampleRate) + 64);
         tracker.prepare (sampleRate, ring.size());
         const int grainCapacity = (int) std::ceil (0.75 * sampleRate) + 16;
-        for (auto& voice : voices)
-            voice.prepare (sampleRate, grainCapacity);
+        for (size_t i = 0; i < voices.size(); ++i)
+        {
+            voices[i].prepare (sampleRate, grainCapacity);
+            voices[i].setIndex ((int) i);
+        }
+        tone.prepare (sampleRate);
 
         tuneSemis.reset (sampleRate, 0.02);
         bendSemis.reset (sampleRate, 0.03);
@@ -31,6 +35,8 @@ namespace grainlock
         bypassFade.reset (sampleRate, 0.02);
         trackAmount.reset (sampleRate, 0.03);
         feedback.reset (sampleRate, 0.02);
+        for (auto* s : { &hollow, &width, &spread, &drift })
+            s->reset (sampleRate, 0.03);
         gateUp = (float) (1.0 / (0.005 * sampleRate));
         gateDown = (float) (1.0 / (0.050 * sampleRate));
         // The DC blocker sits at 1 Hz: any higher and its phase lead pulls the ringing part of a low note sharp.
@@ -69,6 +75,8 @@ namespace grainlock
         sampleClock = 0;
         gateGain = 1.0f;
         gridHasSeen = false;
+        tone.reset();
+        toneTail = 0;
         limiter.reset();
 
         // Controllers go back to rest here and on "reset controllers" only, never when notes are cleared.
@@ -170,6 +178,10 @@ namespace grainlock
             bypassFade.setCurrentAndTargetValue (params.bypass ? 1.0f : 0.0f);
             trackAmount.setCurrentAndTargetValue (params.formantTrack ? 1.0f : 0.0f);
             feedback.setCurrentAndTargetValue (params.feedbackPercent / 100.0f);
+            hollow.setCurrentAndTargetValue (params.hollowPercent / 100.0f);
+            width.setCurrentAndTargetValue (params.widthPercent / 100.0f);
+            spread.setCurrentAndTargetValue (params.spreadPercent / 100.0f);
+            drift.setCurrentAndTargetValue (params.driftPercent / 100.0f);
             firstBlock = false;
         }
         else
@@ -189,6 +201,20 @@ namespace grainlock
             bypassFade.setTargetValue (params.bypass ? 1.0f : 0.0f);
             trackAmount.setTargetValue (params.formantTrack ? 1.0f : 0.0f);
             feedback.setTargetValue (params.feedbackPercent / 100.0f);
+            hollow.setTargetValue (params.hollowPercent / 100.0f);
+            width.setTargetValue (params.widthPercent / 100.0f);
+            spread.setTargetValue (params.spreadPercent / 100.0f);
+            drift.setTargetValue (params.driftPercent / 100.0f);
+        }
+
+        {
+            ToneSettings wanted;
+            wanted.lowCutHz = params.lowCutHz;
+            wanted.highCutHz = params.highCutHz;
+            wanted.tiltDb = params.tiltDb;
+            wanted.driveDb = params.driveDb;
+            wanted.diffuse = params.diffusePercent / 100.0f;
+            tone.setTargets (wanted);
         }
 
         // Feedback at exactly 0 (and done fading) is not in the path at all: the memory holds the
@@ -424,6 +450,11 @@ namespace grainlock
         ctx.feedbackOn = feedbackActive;
         ctx.feedbackLag = feedbackLag;
         ctx.beatsPerSample = beatsPerSample;
+        ctx.hollow = hollow.getNextValue();
+        ctx.width = width.getNextValue();
+        ctx.spread = spread.getNextValue();
+        ctx.spreadMode = block.spreadMode;
+        ctx.drift = drift.getNextValue();
         ctx.captureRatioMax = captureRatioMax;
         ctx.captureCyclesMax = captureCyclesMax;
         ctx.captureBothLayouts = captureBothLayouts;
@@ -495,6 +526,35 @@ namespace grainlock
 
             updateFeedback (send);
 
+            // Tone: on the frozen sound only, and only while there is some (it is left to ring out
+            // after the last voice, then cleared, so at rest the output is the input again exactly).
+            bool toneRinging = false;
+            if (anyVoice || toneTail > 0)
+            {
+                if (tone.isNeutral())
+                {
+                    toneTail = 0;
+                }
+                else
+                {
+                    if (anyVoice)
+                        toneTail = (int) (tone.tailSeconds() * sampleRate);
+
+                    tone.process (wetL, wetR);
+                    toneRinging = true;
+
+                    if (! anyVoice && --toneTail <= 0)
+                    {
+                        toneTail = 0;
+                        tone.settle();
+                    }
+                }
+            }
+            else if (tone.isUnsettled())
+            {
+                tone.settle();   // at rest a stage is simply on or off
+            }
+
             // Dry When Idle: full dry while no key is down; Mix applies while keys are held.
             const float m = mix.getNextValue();
             if (anyVoiceEngaged())
@@ -515,7 +575,7 @@ namespace grainlock
             float limL = outL, limR = outR;
             limiter.process (limL, limR);
 
-            const bool needLimiter = anyVoice || activity > 0.0f || ! juce::exactlyEqual (g, 1.0f) || outGain.isSmoothing();
+            const bool needLimiter = anyVoice || toneRinging || activity > 0.0f || ! juce::exactlyEqual (g, 1.0f) || outGain.isSmoothing();
             limiterBlend = needLimiter ? 1.0f : juce::jmax (0.0f, limiterBlend - limiterFadeStep);
 
             if (limiterBlend >= 1.0f || ! std::isfinite (outL) || ! std::isfinite (outR))
@@ -648,11 +708,11 @@ namespace grainlock
         feedbackRight = out[1];
     }
 
-    void GrainEngine::advanceGrid (const VoiceContext& ctx, int sampleInBlock) noexcept
+    void GrainEngine::advanceGrid (const VoiceContext& ctx, int sample) noexcept
     {
         // The host gives the song position once per block; each sample's is worked out from it, so a
         // line lands on the same sample at any block size.
-        const double ppq = gridPpq + (double) sampleInBlock * gridPpqPerSample;
+        const double ppq = gridPpq + (double) sample * gridPpqPerSample;
         const auto index = (juce::int64) std::floor (ppq / gridBeats + 1.0e-9);
 
         if (! gridHasSeen)
