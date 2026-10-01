@@ -57,6 +57,7 @@ namespace grainlock
         bool pitchLock = true;
         bool live = true;
         double refreshSamples = 1200.0;
+        bool refreshSynced = false;     // Refresh is a note value: re-grabs keep their tempo from the note's start
 
         // Capture budget: the most the knobs and LFO can ask of a grain before it is replaced.
         float captureRatioMax = 1.0f;
@@ -104,8 +105,13 @@ namespace grainlock
         void arm (int midiNote, float velocityLevel, juce::uint64 order) noexcept;
 
         /** The armed voice makes its grab and starts to sound. Every per-note clock (the envelopes, a
-            per-voice LFO's phase, an LFO's fade-in) starts here, not at the key. */
-        void beginSounding (const VoiceContext& ctx, const CaptureSource& source) noexcept;
+            per-voice LFO's phase, an LFO's fade-in) starts here, not at the key. source says where the
+            slice ends; placed means that spot was chosen on purpose (At Key), so it is not nudged. */
+        void beginSounding (const VoiceContext& ctx, const CaptureSource& source, bool placed = false) noexcept;
+
+        /** Source samples the loop region of midiNote would cover on this voice (its cycles x period x
+            formant): how far after the key an At Key grab has to end. */
+        double plannedRegion (const VoiceContext& ctx, int midiNote) noexcept;
 
         /** arm() and beginSounding() at once. */
         void start (int midiNote, float velocityLevel, juce::uint64 order,
@@ -115,7 +121,13 @@ namespace grainlock
             A negative velocityLevel keeps the current level. */
         void retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope);
 
-        /** Does nothing to a voice that is already released. */
+        /** The same, for a key that waited: the new grab ends grabDelay samples before now (counted on
+            until the voice is free to take it) instead of at the usual Offset. */
+        void retargetPlaced (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope,
+                             int grabDelay, bool placed);
+
+        /** Does nothing to a voice that is already released. A voice that is still waiting to grab
+            remembers how long its key was down and plays that long once it has grabbed. */
         void release() noexcept;
         void steal (int fadeSamples) noexcept;
         void kill() noexcept;
@@ -135,8 +147,9 @@ namespace grainlock
         bool isReleasing() const noexcept { return active && ! held && ! stealing; }
         /** Armed but not yet sounding. */
         bool isWaiting() const noexcept   { return active && waiting; }
-        /** Held and sounding: what holds the dry signal down for Dry When Idle. */
-        bool isEngaged() const noexcept   { return isHeld() && ! waiting; }
+        /** Sounding, and still on (held, or playing out the length of a key that came up while it
+            waited): what holds the dry signal down for Dry When Idle. */
+        bool isEngaged() const noexcept   { return active && ! stealing && ! waiting && (held || gateRemaining > 0); }
         int getNote() const noexcept      { return note; }
         juce::uint64 getStartOrder() const noexcept { return startOrder; }
 
@@ -196,6 +209,8 @@ namespace grainlock
             without moving any clock (used when the voice starts). */
         void evaluate (const VoiceContext& ctx, bool advance) noexcept;
         void restartNoteEnvelope() noexcept;
+        /** Everything that starts with the note: this voice's own LFOs, their fade-in, the note envelope. */
+        void restartNoteClocks (const VoiceContext& ctx) noexcept;
 
         /** Formant Track: how much longer a cycle a grab made at capturePeriod reads than its own
             period, so that every key reads the same length of source (the C3 period x Formant). The
@@ -255,6 +270,16 @@ namespace grainlock
         EnvStage noteEnvStage = EnvStage::idle;
         float noteEnv = 0.0f;
         bool noteEnvInstant = true;         // Attack is 0: the envelope starts at its peak
+        // A key released during the wait: the note still plays for as long as the key was down.
+        int waitedSamples = 0, gateSamples = 0, gateRemaining = 0;
+
+        // A mono re-grab that waited: where its slice ends, and whether that spot was chosen on purpose.
+        int placedDelay = -1;
+        bool placedGrab = false;
+
+        // Synced Refresh: re-grabs fall due on a clock that starts with the note.
+        double noteAge = 0.0, refreshDueAt = 0.0;
+
         bool tapeStopEnabled = false;
         bool tapeStopping = false;
         double tapeSemitones = 0.0;

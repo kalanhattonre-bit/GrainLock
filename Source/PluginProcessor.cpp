@@ -104,6 +104,12 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
         p.sources[i].dest          = (ModDest) juce::jlimit (0, numModDests - 1, asInt (params.source[i].dest, (int) d.sources[i].dest));
         p.sources[i].amountPercent = value (params.source[i].amount, d.sources[i].amountPercent);
     }
+
+    p.grabAtKey        = asInt (params.grabAt, d.grabAtKey ? 1 : 0) == 1;
+    p.waitMs           = juce::jlimit (0.0f, 2000.0f, value (params.wait, d.waitMs));
+    p.waitSync         = asInt (params.waitSync, d.waitSync);
+    p.offsetSync       = asInt (params.offsetSync, d.offsetSync);
+    p.refreshSync      = asInt (params.refreshSync, d.refreshSync);
     return p;
 }
 

@@ -98,6 +98,19 @@ namespace grainlock
         return choices;
     }
 
+    const juce::StringArray& grabSyncChoices()
+    {
+        static const juce::StringArray choices { "Free", "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2", "1/1" };
+        return choices;
+    }
+
+    double grabSyncBeats (int syncIndex) noexcept
+    {
+        static constexpr double beats[] = { 0.0, 0.125, 1.0 / 6.0, 0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0, 2.0, 4.0 };
+        constexpr int count = (int) (sizeof (beats) / sizeof (beats[0]));
+        return beats[juce::jlimit (0, count - 1, syncIndex)];
+    }
+
     double lfoSyncBeats (int syncIndex) noexcept
     {
         // Quarter-note beats per LFO cycle; triplets are two thirds of the straight value.
@@ -205,6 +218,13 @@ namespace grainlock
                                     [] (float v, int) { return signedString ((float) juce::roundToInt (v), 0) + "%"; }));
         }
 
+        // WHEN A NOTE GRABS. Before Key with no Wait is 0.2: the slice ends Offset before the key.
+        layout.add (choiceParam (ParamID::grabAt, "Grab At", { "Before Key", "At Key" }, 0));
+        layout.add (floatParam (ParamID::wait, "Wait", skewedRange (0.0f, 2000.0f, 0.1f, 250.0f), 0.0f, formatMs, parseMs));
+        layout.add (choiceParam (ParamID::waitSync, "Wait Sync", grabSyncChoices(), 0));
+        layout.add (choiceParam (ParamID::offsetSync, "Offset Sync", grabSyncChoices(), 0));
+        layout.add (choiceParam (ParamID::refreshSync, "Refresh Sync", lfoSyncChoices(), 0));
+
         // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
         layout.add (boolParam (ParamID::bypass, "Bypass", false));
 
@@ -255,6 +275,12 @@ namespace grainlock
         bendDown   = get (ParamID::bendDown);
         vibRate    = get (ParamID::vibRate);
         vibDepth   = get (ParamID::vibDepth);
+
+        grabAt      = get (ParamID::grabAt);
+        wait        = get (ParamID::wait);
+        waitSync    = get (ParamID::waitSync);
+        offsetSync  = get (ParamID::offsetSync);
+        refreshSync = get (ParamID::refreshSync);
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);

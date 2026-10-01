@@ -412,15 +412,35 @@ namespace grainlock
         polyPressure = polyPressureSmoothed = 0.0f;   // a reused slot never inherits the last note's pressure
         tapeStopping = false;
         tapeSemitones = 0.0;
+        waitedSamples = gateSamples = gateRemaining = 0;
+        placedDelay = -1;
+        placedGrab = false;
         transition.active = false;
         envelope.reset();
     }
 
-    void GrainVoice::beginSounding (const VoiceContext& ctx, const CaptureSource& source) noexcept
+    double GrainVoice::plannedRegion (const VoiceContext& ctx, int midiNote) noexcept
     {
-        waiting = false;
+        // A voice that has not sounded yet is read as it will be at its first sample; a sounding one
+        // (mono, a key that is waiting its turn) already has this sample's values.
+        if (waiting)
+        {
+            restartNoteClocks (ctx);
+            evaluate (ctx, false);
+        }
 
-        // Every per-note clock starts here: the voice's own LFOs, their fade-in, the note envelope.
+        // The key's own period, with whatever tune, bend and pitch LFO are on the voice now. The region
+        // is everything the loop reads: its cycles and the seam that fades in ahead of them.
+        const double period = sampleRate / frequencyFor (basePitch - pitch.value + (double) midiNote);
+        const double cycle = period * (double) ratio * trackFactor (period);
+        const double seam = juce::jlimit (0.0, maxSeam, (double) ctx.smooth);
+        const double n = (double) cyclesNow;
+        const double region = ctx.pitchLock ? (n + seam) * cycle : n * (1.0 + seam) * cycle;
+        return juce::jlimit (1.0, 0.8 * (double) grains[0].maxSpan(), region);   // never longer than a grain can use
+    }
+
+    void GrainVoice::restartNoteClocks (const VoiceContext& ctx) noexcept
+    {
         for (size_t i = 0; i < (size_t) numLfos; ++i)
         {
             ownLfos[i].restart();
@@ -429,11 +449,24 @@ namespace grainlock
         }
         noteEnvInstant = ctx.mods.envAttackStep >= 1.0f;
         restartNoteEnvelope();
+    }
+
+    void GrainVoice::beginSounding (const VoiceContext& ctx, const CaptureSource& source, bool placed) noexcept
+    {
+        waiting = false;
+        // The key is already up: the note plays for as long as the key was down. (One more than the
+        // count, so the release lands on the same sample it would for a key held that long.)
+        gateRemaining = held ? 0 : juce::jmax (1, gateSamples) + 1;
+        noteAge = 0.0;
+        refreshDueAt = ctx.refreshSamples;
+
+        // Every per-note clock starts here: the voice's own LFOs, their fade-in, the note envelope.
+        restartNoteClocks (ctx);
         evaluate (ctx, false);
 
         current = 0;
         const int cycles = cyclesNow;
-        capture (grains[0], frequencyFor (basePitch), ctx, source);
+        capture (grains[0], frequencyFor (basePitch), ctx, source, ! placed);
 
         PlayState first;
         first.grain = 0;
@@ -476,9 +509,19 @@ namespace grainlock
 
         // Every note grabs its own slice; the swap crossfades as soon as the voice is free to.
         pendingRecapture = true;
+        placedDelay = -1;
+        placedGrab = false;
 
         if (retriggerEnvelope)
             envelope.noteOn();
+    }
+
+    void GrainVoice::retargetPlaced (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope,
+                                     int grabDelay, bool placed)
+    {
+        retarget (midiNote, velocityLevel, glideSamples, retriggerEnvelope);
+        placedDelay = juce::jmax (0, grabDelay);
+        placedGrab = placed;
     }
 
     void GrainVoice::release() noexcept
@@ -490,7 +533,7 @@ namespace grainlock
         held = false;
         if (waiting)
         {
-            kill();   // released before it ever sounded: nothing to fade
+            gateSamples = juce::jmax (1, waitedSamples);   // it will sound this long once it has grabbed
             return;
         }
 
@@ -502,6 +545,12 @@ namespace grainlock
     {
         if (! active)
             return;
+
+        if (waiting)
+        {
+            kill();   // nothing is sounding yet, so there is nothing to fade
+            return;
+        }
 
         stealing = true;
         held = false;
@@ -518,6 +567,9 @@ namespace grainlock
         pendingRecapture = false;
         tapeStopping = false;
         tapeSemitones = 0.0;
+        waitedSamples = gateSamples = gateRemaining = 0;
+        placedDelay = -1;
+        placedGrab = false;
         transition.active = false;
         envelope.reset();
     }
@@ -652,9 +704,27 @@ namespace grainlock
         fresh.cycles = cyclesNow;
         fresh.lockOn = ctx.pitchLock;
 
+        // Where the new slice ends: a re-grab that waited ends where its key asked; otherwise at the
+        // usual lag, but never further back than the grain it replaces.
+        CaptureSource from = source;
+        bool nudge = true;
+        if (placedDelay >= 0)
+        {
+            from.offsetSamples = placedDelay;
+            nudge = ! placedGrab;
+            placedDelay = -1;
+            placedGrab = false;
+        }
+        else
+        {
+            const double previousEnd = (double) lastCaptureOffset + samplesSinceCapture;
+            if (previousEnd < (double) source.offsetSamples)
+                from.offsetSamples = (int) previousEnd;
+        }
+
         // Sized for the note being glided TO, so a slice is always its own note's wavelength.
         auto& grain = grains[(size_t) fresh.grain];
-        capture (grain, frequencyFor (baseTargetPitch), ctx, source);
+        capture (grain, frequencyFor (baseTargetPitch), ctx, from, nudge);
         fresh.taps = tapsThatFit (grain, fresh.cycles, fresh.lockOn, ratio);
 
         // A re-grab of the same shape moves towards its new measurements, so noise in them does not
@@ -740,12 +810,30 @@ namespace grainlock
 
     void GrainVoice::render (const VoiceContext& ctx, const CaptureSource& source, float& outLeft, float& outRight) noexcept
     {
-        if (! active || waiting)
+        if (! active)
             return;
+
+        if (waiting)
+        {
+            ++waitedSamples;
+            return;
+        }
+
+        // A key that came up during the wait: the note has now played for as long as the key was down.
+        // (Before anything else this sample, which is where a key coming up now would land.)
+        if (gateRemaining > 0 && --gateRemaining == 0)
+        {
+            envelope.noteOff();
+            tapeStopping = tapeStopEnabled;
+        }
 
         evaluate (ctx, true);
         const double frequency = soundingFrequency;
         const bool live = ctx.live && ! tapeStopping;   // a note slowing to a stop keeps the audio it has
+        noteAge += 1.0;
+
+        if (pendingRecapture && placedDelay >= 0 && transition.active)
+            ++placedDelay;   // the audio it asked for moves further back while the voice is busy
 
         if (! transition.active)
         {
@@ -830,8 +918,20 @@ namespace grainlock
         if (wrapped && live && ! transition.active && ! pendingRecapture)
         {
             const double loop = loopLengthSamples (states[(size_t) current], frequency);
-            if (samplesSinceCapture >= juce::jmax (ctx.refreshSamples, 2.0 * loop))
+            if (! ctx.refreshSynced)
+            {
+                if (samplesSinceCapture >= juce::jmax (ctx.refreshSamples, 2.0 * loop))
+                    beginRecapture (frequency, ctx, source);
+            }
+            else if (noteAge >= refreshDueAt && samplesSinceCapture >= 2.0 * loop)
+            {
+                // A note value: the next grab falls due one interval after this one was DUE, so the
+                // rhythm holds its tempo instead of drifting by a loop each time.
                 beginRecapture (frequency, ctx, source);
+                refreshDueAt += ctx.refreshSamples;
+                if (refreshDueAt <= noteAge)
+                    refreshDueAt = noteAge + ctx.refreshSamples;
+            }
         }
 
         float gain = envelope.next (ctx.sustain) * level.getNextValue() * levelMod;

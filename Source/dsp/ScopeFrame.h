@@ -23,6 +23,19 @@ namespace grainlock
         bool hasWave = false;
         bool live = true;
         std::array<juce::uint64, 2> heldNotes {};   // bit n set = MIDI note n is held
+        std::array<juce::uint64, 2> waitingNotes {};   // bit n set = a key that is down but has not grabbed yet
+        float offsetMs = 0.0f, waitMs = 0.0f;       // the Offset and Wait in use (a synced value may have been halved)
+
+        bool isWaiting (int note) const noexcept
+        {
+            return note >= 0 && note < 128 && ((waitingNotes[(size_t) (note >> 6)] >> (note & 63)) & 1u) != 0;
+        }
+
+        void setWaiting (int note) noexcept
+        {
+            if (note >= 0 && note < 128)
+                waitingNotes[(size_t) (note >> 6)] |= (juce::uint64) 1 << (note & 63);
+        }
 
         bool isHeld (int note) const noexcept
         {
