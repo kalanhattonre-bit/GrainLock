@@ -519,6 +519,7 @@ namespace grainlock
         keyGrabPlaced = false;
         sinceSend = 0;
         refreshClockStale = false;
+        holdBeats = -1.0;
         transition.active = false;
         envelope.reset();
     }
@@ -571,7 +572,7 @@ namespace grainlock
 
         current = 0;
         const int cycles = cyclesNow;
-        capture (grains[0], frequencyFor (basePitch), ctx, source, ! placed);
+        capture (grains[0], frequencyFor (baseTargetPitch), ctx, source, ! placed);   // the note a glide is heading for
 
         PlayState first;
         first.grain = 0;
@@ -596,11 +597,26 @@ namespace grainlock
         beginSounding (ctx, source);
     }
 
-    void GrainVoice::retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope)
+    void GrainVoice::glideFrom (double fromNote, int glideSamples, bool perOctave) noexcept
+    {
+        const double to = pitch.target;
+        const int samples = perOctave ? (int) std::lround ((double) glideSamples * std::abs (to - fromNote) / 12.0) : glideSamples;
+        pitch.jumpTo (fromNote);
+        pitch.moveTo (to, samples);
+    }
+
+    void GrainVoice::releaseInBeats (double beats) noexcept
+    {
+        if (active && held && ! stealing)
+            holdBeats = juce::jmax (0.0, beats);
+    }
+
+    void GrainVoice::retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope, bool perOctave)
     {
         note = midiNote;
         held = true;
         stealing = false;
+        holdBeats = -1.0;
 
         // A key now holds the note: the length of an earlier tap no longer applies, and neither does
         // its At Key distance. The synced Refresh clock starts again from this key.
@@ -616,7 +632,10 @@ namespace grainlock
         if (retriggerEnvelope)
             restartNoteEnvelope();
 
-        pitch.moveTo ((double) midiNote, glideSamples);
+        // Per octave: the knob is the time for twelve semitones, measured from where the pitch is now.
+        pitch.moveTo ((double) midiNote,
+                      perOctave ? (int) std::lround ((double) glideSamples * std::abs ((double) midiNote - pitch.value) / 12.0)
+                                : glideSamples);
         if (velocityLevel >= 0.0f)
             level.setTargetValue (velocityLevel);
 
@@ -630,9 +649,9 @@ namespace grainlock
     }
 
     void GrainVoice::retargetPlaced (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope,
-                                     int grabDelay, bool placed, int atKeyPart)
+                                     int grabDelay, bool placed, int atKeyPart, bool perOctave)
     {
-        retarget (midiNote, velocityLevel, glideSamples, retriggerEnvelope);
+        retarget (midiNote, velocityLevel, glideSamples, retriggerEnvelope, perOctave);
         placedDelay = juce::jmax (0, grabDelay);
         placedGrab = placed;
         atKeySamples = juce::jmax (0, atKeyPart);
@@ -645,6 +664,7 @@ namespace grainlock
             return;
 
         held = false;
+        holdBeats = -1.0;
         gateRemaining = juce::jmax (0, samples) + 1;   // the same count beginSounding uses
     }
 
@@ -677,6 +697,7 @@ namespace grainlock
         }
 
         held = false;
+        holdBeats = -1.0;
         if (waiting)
         {
             gateSamples = waitedSamples;   // it will sound this long once it has grabbed
@@ -700,6 +721,7 @@ namespace grainlock
 
         stealing = true;
         held = false;
+        holdBeats = -1.0;
         stealLength = juce::jmax (1, fadeSamples);
         stealRemaining = stealLength;
     }
@@ -719,6 +741,7 @@ namespace grainlock
         atKeySamples = 0;
         keyGrabPlaced = false;
         refreshClockStale = false;
+        holdBeats = -1.0;
         transition.active = false;
         envelope.reset();
     }
@@ -1019,6 +1042,14 @@ namespace grainlock
         {
             envelope.noteOff();
             tapeStopping = tapeStopEnabled;
+        }
+
+        // A note that ends after a number of beats (an On Grid key-up, Full's length).
+        if (holdBeats >= 0.0 && held)
+        {
+            holdBeats -= ctx.beatsPerSample;
+            if (holdBeats <= 0.0)
+                release();
         }
 
         evaluate (ctx, true);

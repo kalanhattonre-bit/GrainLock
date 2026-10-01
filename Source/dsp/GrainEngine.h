@@ -77,6 +77,15 @@ namespace grainlock
         float skipChancePercent = 0.0f;
         float feedbackPercent = 0.0f;
 
+        // How notes are held, and how many play
+        bool sustainPedal = true;             // CC64 holds notes (Normal and On Grid)
+        HoldMode holdMode = HoldMode::normal;
+        int holdTime = 6;                     // index into holdTimeChoices(): the grid of On Grid, the length of Full
+        bool glideLegato = false;             // glide only when the new key overlaps another
+        bool glidePerOctave = false;          // Glide is the time for one octave
+        bool polyGlide = false;               // a new poly note glides in from the last key played
+        int voices = 8;
+
         // Keyboard
         int bendUp = 2, bendDown = 2;    // semitones
         float vibRateHz = 5.5f;
@@ -131,10 +140,36 @@ namespace grainlock
         VoiceContext nextContext() noexcept;
         void handleMidiEvent (const juce::uint8* data, int numBytes, const VoiceContext& ctx) noexcept;
 
-        void noteOn (int note, int velocity, const VoiceContext& ctx) noexcept;
-        void noteOff (int note, const VoiceContext& ctx) noexcept;
-        void monoNoteOn (int note, int velocity, const VoiceContext& ctx) noexcept;
-        void monoNoteOff (int note, const VoiceContext& ctx) noexcept;
+        /** overlap: another key was physically down when this one was pressed. */
+        void noteOn (int note, int velocity, const VoiceContext& ctx, bool overlap) noexcept;
+        void monoNoteOn (int note, int velocity, const VoiceContext& ctx, bool overlap) noexcept;
+        /** deferBeats: the release happens after that many beats (On Grid); negative = now. */
+        void noteOff (int note, double deferBeats) noexcept;
+        void monoNoteOff (int note, double deferBeats) noexcept;
+        /** Mono, after the stack of keys has changed: brings the voice (and a key waiting its turn)
+            into line with the keys that are left. */
+        void monoSettle (double deferBeats) noexcept;
+
+        // Physical keys.
+        bool keyIsDown (int note) const noexcept { return note >= 0 && note < 128 && ((keysDown[(size_t) (note >> 6)] >> (note & 63)) & 1u) != 0; }
+        bool anyKeyDown() const noexcept         { return (keysDown[0] | keysDown[1]) != 0; }
+        void setKey (int note, bool down) noexcept;
+        bool stackHolds (int note) const noexcept;
+
+        /** The sustain pedal counts in Normal and On Grid. */
+        bool pedalHolds() const noexcept { return pedalDown && (block.holdMode == HoldMode::normal || block.holdMode == HoldMode::onGrid); }
+        /** Releases every held note whose key is up (pedal up, Latch switched off, the song stopping). */
+        void releaseKeysUp (double deferBeats) noexcept;
+        void releaseVoice (GrainVoice& voice, double deferBeats) noexcept;
+        /** On Grid: beats from the sample being worked on to the next Hold Time line; negative when the
+            release should happen now (stopped, or the key came up on a line). */
+        double beatsToNextLine() const noexcept;
+        /** Full: starts a note's length. */
+        void startHoldLength (GrainVoice& voice) noexcept;
+        /** Fades or drops voices until no more than limit are playing: release tails first, then notes
+            whose key is up, then the oldest key. */
+        void trimVoices (int limit) noexcept;
+        int nextVictim() const noexcept;
         void releaseAll() noexcept;
         void killAll() noexcept;
         int findFreeSlot() noexcept;
@@ -238,6 +273,7 @@ namespace grainlock
             juce::int64 pressedAt = 0;
             bool released = false;
             int heldFor = 0;
+            bool overlap = false;      // another key was down when it was pressed (legato)
         } monoKey;
         std::array<double, numLfos> lfoIncrement {};
         std::array<bool, numLfos> lfoSynced {};
@@ -285,6 +321,14 @@ namespace grainlock
         std::array<int, 128> noteStack {};
         int stackSize = 0;
         int monoVoice = -1;
+
+        // Hold: which keys are physically down, the pedal, and the song as this block sees it.
+        std::array<juce::uint64, 2> keysDown {};
+        bool pedalDown = false;
+        int lastNote = -1;              // the last key played, for Poly Glide; -1 = none yet
+        bool songRunning = false;       // playing, with a position
+        double songPpq = 0.0, beatsPerSample = 0.0, holdLineBeats = 1.0;
+        int sampleInBlock = 0;          // the sample being worked on
 
         juce::uint64 voiceCounter = 0;
         int lastStartedVoice = -1;

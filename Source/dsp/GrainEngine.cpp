@@ -91,8 +91,64 @@ namespace grainlock
         if (! firstBlock && params.mono != monoMode)
             releaseAll();   // switching mode lets sounding notes ring out instead of cutting them
 
+        // The song, as notes that end on a beat need it.
+        const bool songWasRunning = songRunning;
+        songRunning = timing.playing && timing.hasPpq;
+        songPpq = timing.ppq;
+        beatsPerSample = (timing.bpm >= 1.0 ? timing.bpm : 120.0) / 60.0 / sampleRate;
+        holdLineBeats = holdTimeBeats (params.holdTime);
+
+        const HoldMode previousHoldMode = block.holdMode;
+        const bool pedalWasOn = block.sustainPedal;
+
         monoMode = params.mono;
         block = params;
+
+        if (! firstBlock)
+        {
+            // Changing Hold Mode is the way to stop what the old mode was holding: every count ends,
+            // and notes whose key is up are released (the pedal still holds them where it counts).
+            if (params.holdMode != previousHoldMode)
+            {
+                for (auto& voice : voices)
+                    voice.cancelHoldTimer();
+                if (! pedalHolds())
+                    releaseKeysUp (-1.0);
+
+                // Into Full: a note whose key is down gets its length from now (the key will not end it).
+                if (params.holdMode == HoldMode::full)
+                    for (auto& voice : voices)
+                        if (voice.isHeld())
+                            voice.releaseInBeats (holdLineBeats);
+            }
+
+            // Sustain Pedal switched off under a held pedal: its notes end.
+            if (pedalWasOn && ! params.sustainPedal && pedalDown)
+            {
+                pedalDown = false;
+                if (params.holdMode == HoldMode::normal || params.holdMode == HoldMode::onGrid)
+                    releaseKeysUp (-1.0);
+            }
+
+            // The song stops: releases that were waiting for a line happen now, and a latched chord
+            // ends, so Stop is never followed by a drone. (Latch works as usual while stopped.)
+            if (songWasRunning && ! songRunning)
+            {
+                if (params.holdMode == HoldMode::onGrid)
+                {
+                    for (auto& voice : voices)
+                        if (voice.hasHoldTimer())
+                            voice.release();
+                }
+                else if (params.holdMode == HoldMode::latch)
+                {
+                    releaseKeysUp (-1.0);
+                }
+            }
+
+            if (! monoMode)
+                trimVoices (params.voices);   // a lowered Voices takes effect within a block
+        }
 
         const float tune = (float) params.tuneSemitones + params.fineCents / 100.0f;
         const float gain = juce::Decibels::decibelsToGain (params.outGainDb);
@@ -367,6 +423,7 @@ namespace grainlock
         ctx.stickyLive = stickyLive;
         ctx.feedbackOn = feedbackActive;
         ctx.feedbackLag = feedbackLag;
+        ctx.beatsPerSample = beatsPerSample;
         ctx.captureRatioMax = captureRatioMax;
         ctx.captureCyclesMax = captureCyclesMax;
         ctx.captureBothLayouts = captureBothLayouts;
@@ -392,6 +449,7 @@ namespace grainlock
         {
             const VoiceContext ctx = nextContext();
             lastContext = ctx;
+            sampleInBlock = i;
 
             // Notes grab audio up to (not including) the sample they land on.
             while (midiIt != midiEnd && (*midiIt).samplePosition <= i)
@@ -496,6 +554,7 @@ namespace grainlock
         }
 
         // Anything stamped past the end of the block (hosts should not send these).
+        sampleInBlock = numSamples;
         for (; midiIt != midiEnd; ++midiIt)
         {
             const auto event = *midiIt;
@@ -744,6 +803,7 @@ namespace grainlock
     void GrainEngine::fireGrab (int slot, const VoiceContext& ctx, int endDelay, bool placed, int atKeyPart) noexcept
     {
         voices[(size_t) slot].beginSounding (ctx, CaptureSource { &ring, endDelay }, placed, atKeyPart);
+        startHoldLength (voices[(size_t) slot]);
         pendingGrabs[(size_t) slot].active = false;
         restartNoteLfos();
         lastStartedVoice = slot;
@@ -763,13 +823,15 @@ namespace grainlock
         const auto key = monoKey;
         monoKey.active = false;
 
-        const int glideSamples = (int) ((double) block.glideMs * sampleRate / 1000.0);
+        const int glideSamples = (block.glideLegato && ! key.overlap) ? 0 : (int) ((double) block.glideMs * sampleRate / 1000.0);
 
         if (monoVoice >= 0 && voices[(size_t) monoVoice].isActive() && ! voices[(size_t) monoVoice].isStealing()
             && ! voices[(size_t) monoVoice].isWaiting())
         {
             auto& voice = voices[(size_t) monoVoice];
-            voice.retargetPlaced (key.note, key.level, glideSamples, ! voice.isHeld(), endDelay, placed, key.grab.atKeyPart);
+            const bool legato = key.overlap && voice.isHeld();
+            voice.retargetPlaced (key.note, key.level, glideSamples, ! legato, endDelay, placed, key.grab.atKeyPart, block.glidePerOctave);
+            startHoldLength (voice);
             restartNoteLfos();
         }
         else
@@ -864,13 +926,51 @@ namespace grainlock
         }
         else if (status == 0x90 && d2 > 0)
         {
-            if (monoMode) monoNoteOn (d1, d2, ctx);
-            else          noteOn (d1, d2, ctx);
+            const bool overlap = anyKeyDown();   // judged before this key counts as down
+            const bool wasDown = keyIsDown (d1);
+            setKey (d1, true);
+
+            if (block.holdMode == HoldMode::latch && ! monoMode)
+            {
+                if (! overlap)
+                {
+                    // The first key after every key was up starts a new chord: the old one goes.
+                    for (auto& voice : voices)
+                        if (voice.isHeld())
+                            voice.release();
+                }
+                else if (! wasDown)
+                {
+                    // A note of the latched chord pressed again while another key is down is taken out of it.
+                    bool removed = false;
+                    for (auto& voice : voices)
+                    {
+                        if (voice.isHeld() && voice.getNote() == d1)
+                        {
+                            voice.release();
+                            removed = true;
+                        }
+                    }
+                    if (removed)
+                        return;
+                }
+            }
+
+            if (monoMode) monoNoteOn (d1, d2, ctx, overlap);
+            else          noteOn (d1, d2, ctx, overlap);
+            lastNote = d1;
         }
         else if (status == 0x80 || status == 0x90)
         {
-            if (monoMode) monoNoteOff (d1, ctx);
-            else          noteOff (d1, ctx);
+            setKey (d1, false);
+
+            // Latch and Full take no notice of a key coming up; the pedal holds it in Normal and On Grid.
+            if (block.holdMode == HoldMode::latch || block.holdMode == HoldMode::full || pedalHolds())
+                return;
+
+            const double deferBeats = block.holdMode == HoldMode::onGrid ? beatsToNextLine() : -1.0;
+            if (monoMode) monoNoteOff (d1, deferBeats);
+            else          noteOff (d1, deferBeats);
         }
         else if (status == 0xe0)
         {
@@ -884,6 +984,18 @@ namespace grainlock
             else if (d1 == 11)  expression.setTargetValue ((float) d2 / 127.0f);
             else if (d1 == 120) killAll();                          // all sound off
             else if (d1 == 123) releaseAll();                       // all notes off
+            else if (d1 == 64)                                      // sustain pedal
+            {
+                if (block.sustainPedal)
+                {
+                    const bool down = d2 >= 64;
+                    const bool lifted = pedalDown && ! down;
+                    const bool counted = pedalHolds();
+                    pedalDown = down;
+                    if (lifted && counted)
+                        releaseKeysUp (block.holdMode == HoldMode::onGrid ? beatsToNextLine() : -1.0);
+                }
+            }
             else if (d1 == 121)                                     // reset controllers
             {
                 bendNorm = 0.0f;
@@ -891,6 +1003,11 @@ namespace grainlock
                 wheel.setTargetValue (0.0f);
                 pressure.setTargetValue (0.0f);
                 expression.setTargetValue (1.0f);
+
+                const bool counted = pedalHolds();
+                pedalDown = false;
+                if (counted)
+                    releaseKeysUp (-1.0);
             }
         }
     }
@@ -908,58 +1025,169 @@ namespace grainlock
             if (! voices[(size_t) i].isActive())
                 return i;
 
-        // Every slot busy (a burst of steals): cut the oldest voice outright.
-        int oldest = 0;
-        for (int i = 1; i < numVoiceSlots; ++i)
-            if (voices[(size_t) i].getStartOrder() < voices[(size_t) oldest].getStartOrder())
-                oldest = i;
+        // Every slot busy (a burst of steals): cut the voice whose fade has the least left; only if
+        // none is fading, the one the voice limit would take next.
+        int victim = -1;
+        for (int i = 0; i < numVoiceSlots; ++i)
+            if (voices[(size_t) i].isStealing()
+                && (victim < 0 || voices[(size_t) i].stealSamplesLeft() < voices[(size_t) victim].stealSamplesLeft()))
+                victim = i;
 
-        voices[(size_t) oldest].kill();
-        return oldest;
+        if (victim < 0)
+            victim = nextVictim();
+        if (victim < 0)
+            victim = 0;
+
+        voices[(size_t) victim].kill();
+        return victim;
     }
 
-    void GrainEngine::noteOn (int note, int velocity, const VoiceContext& ctx) noexcept
+    int GrainEngine::nextVictim() const noexcept
+    {
+        // Release tails go first, then notes whose key is up (held by the pedal, Latch, a length), then
+        // keys that are down; the oldest of each. A note that has not sounded yet counts as a key down.
+        int victim = -1, victimRank = 3;
+        for (int i = 0; i < numVoiceSlots; ++i)
+        {
+            const auto& voice = voices[(size_t) i];
+            if (! voice.isActive() || voice.isStealing())
+                continue;
+
+            const int rank = voice.isWaiting() ? 2
+                           : voice.isHeld()    ? (keyIsDown (voice.getNote()) ? 2 : 1)
+                           : voice.isEngaged() ? 1 : 0;
+            if (victim < 0 || rank < victimRank
+                || (rank == victimRank && voice.getStartOrder() < voices[(size_t) victim].getStartOrder()))
+            {
+                victim = i;
+                victimRank = rank;
+            }
+        }
+        return victim;
+    }
+
+    void GrainEngine::trimVoices (int limit) noexcept
+    {
+        for (int pass = 0; pass < numVoiceSlots; ++pass)
+        {
+            int playing = 0;
+            for (const auto& voice : voices)
+                playing += (voice.isActive() && ! voice.isStealing()) ? 1 : 0;
+
+            const int victim = nextVictim();
+            if (playing <= limit || victim < 0)
+                return;
+
+            voices[(size_t) victim].steal (stealFadeSamples);   // a voice that has not sounded yet is simply dropped
+        }
+    }
+
+    void GrainEngine::setKey (int note, bool down) noexcept
+    {
+        if (note < 0 || note >= 128)
+            return;
+
+        const juce::uint64 bit = (juce::uint64) 1 << (note & 63);
+        if (down) keysDown[(size_t) (note >> 6)] |= bit;
+        else      keysDown[(size_t) (note >> 6)] &= ~bit;
+    }
+
+    bool GrainEngine::stackHolds (int note) const noexcept
+    {
+        for (int i = 0; i < stackSize; ++i)
+            if (noteStack[(size_t) i] == note)
+                return true;
+        return false;
+    }
+
+    double GrainEngine::beatsToNextLine() const noexcept
+    {
+        if (! songRunning || ! (holdLineBeats > 0.0))
+            return -1.0;   // stopped: On Grid is Normal
+
+        const double position = songPpq + (double) sampleInBlock * beatsPerSample;
+        const double into = position - std::floor (position / holdLineBeats) * holdLineBeats;
+
+        // A key that comes up on a line (where every quantised note ends) belongs to that line.
+        if (into < 0.001 * beatsPerSample * sampleRate)
+            return -1.0;
+        return holdLineBeats - into;
+    }
+
+    void GrainEngine::releaseVoice (GrainVoice& voice, double deferBeats) noexcept
+    {
+        if (deferBeats > 0.0 && ! voice.isWaiting())
+            voice.releaseInBeats (deferBeats);
+        else
+            voice.release();
+    }
+
+    void GrainEngine::startHoldLength (GrainVoice& voice) noexcept
+    {
+        if (block.holdMode == HoldMode::full)
+            voice.releaseInBeats (holdLineBeats);
+    }
+
+    void GrainEngine::releaseKeysUp (double deferBeats) noexcept
+    {
+        if (! monoMode)
+        {
+            for (auto& voice : voices)
+                if (voice.isHeld() && ! keyIsDown (voice.getNote()))
+                    releaseVoice (voice, deferBeats);
+            return;
+        }
+
+        // Mono: the stack keeps the keys that are still down, in the order they were pressed.
+        int write = 0;
+        for (int read = 0; read < stackSize; ++read)
+            if (keyIsDown (noteStack[(size_t) read]))
+                noteStack[(size_t) write++] = noteStack[(size_t) read];
+        stackSize = write;
+        monoSettle (deferBeats);
+    }
+
+    void GrainEngine::noteOn (int note, int velocity, const VoiceContext& ctx, bool overlap) noexcept
     {
         // Re-striking a held key starts a fresh voice; the old one releases.
         for (auto& voice : voices)
             if (voice.isHeld() && voice.getNote() == note)
                 voice.release();
 
-        int sounding = 0;
-        int oldest = -1;
-        for (int i = 0; i < numVoiceSlots; ++i)
-        {
-            const auto& voice = voices[(size_t) i];
-            if (voice.isActive() && ! voice.isStealing())
-            {
-                ++sounding;
-                if (oldest < 0 || voice.getStartOrder() < voices[(size_t) oldest].getStartOrder())
-                    oldest = i;
-            }
-        }
-
-        if (sounding >= maxPolyphony && oldest >= 0)
-            voices[(size_t) oldest].steal (stealFadeSamples);
+        trimVoices (block.voices - 1);
 
         const int slot = findFreeSlot();
         voices[(size_t) slot].arm (note, velocityLevel (velocity), ++voiceCounter);
+
+        // Poly Glide: the new note slides in from the last key played.
+        if (block.polyGlide && lastNote >= 0 && lastNote != note && (overlap || ! block.glideLegato))
+        {
+            const int glideSamples = (int) ((double) block.glideMs * sampleRate / 1000.0);
+            if (glideSamples > 0)
+                voices[(size_t) slot].glideFrom ((double) lastNote, glideSamples, block.glidePerOctave);
+        }
+
         startArmedVoice (slot, ctx);
     }
 
-    void GrainEngine::noteOff (int note, const VoiceContext&) noexcept
+    void GrainEngine::noteOff (int note, double deferBeats) noexcept
     {
         for (auto& voice : voices)
             if (voice.isHeld() && voice.getNote() == note)
-                voice.release();
+                releaseVoice (voice, deferBeats);
     }
 
-    void GrainEngine::monoNoteOn (int note, int velocity, const VoiceContext& ctx) noexcept
+    void GrainEngine::monoNoteOn (int note, int velocity, const VoiceContext& ctx, bool overlap) noexcept
     {
+        // Latch and Full take no notice of keys coming up, so there the stack is just the newest key.
+        if (block.holdMode == HoldMode::latch || block.holdMode == HoldMode::full)
+            stackSize = 0;
+
         stackRemove (note);
         stackPush (note);
 
         const float level = velocityLevel (velocity);
-        const int glideSamples = (int) ((double) block.glideMs * sampleRate / 1000.0);
+        const int glideSamples = (block.glideLegato && ! overlap) ? 0 : (int) ((double) block.glideMs * sampleRate / 1000.0);
 
         const bool usable = monoVoice >= 0 && voices[(size_t) monoVoice].isActive() && ! voices[(size_t) monoVoice].isStealing();
 
@@ -970,12 +1198,15 @@ namespace grainlock
             PendingGrab plan;
             if (planGrab (monoVoice, note, ctx, plan))
             {
+                // Legato: another key is physically down under this one. (A note the pedal or Latch is
+                // holding does not count, so its envelope starts again.)
                 auto& voice = voices[(size_t) monoVoice];
-                const bool legato = voice.isHeld();
+                const bool legato = overlap && voice.isHeld();
                 if (plan.placed)   // At Key with an Offset longer than the region: the slice ends where the key put it
-                    voice.retargetPlaced (note, level, glideSamples, ! legato, endDelayFor (plan.planEnd), true, plan.atKeyPart);
+                    voice.retargetPlaced (note, level, glideSamples, ! legato, endDelayFor (plan.planEnd), true, plan.atKeyPart, block.glidePerOctave);
                 else
-                    voice.retarget (note, level, glideSamples, ! legato);
+                    voice.retarget (note, level, glideSamples, ! legato, block.glidePerOctave);
+                startHoldLength (voice);
                 monoKey.active = false;
                 restartNoteLfos();   // in mono every key restarts a Note LFO, legato or not
             }
@@ -988,6 +1219,7 @@ namespace grainlock
                 monoKey.pressedAt = sampleClock;
                 monoKey.released = false;
                 monoKey.heldFor = 0;
+                monoKey.overlap = overlap;
             }
         }
         else
@@ -1003,13 +1235,17 @@ namespace grainlock
         lastStartedVoice = monoVoice;
     }
 
-    void GrainEngine::monoNoteOff (int note, const VoiceContext&) noexcept
+    void GrainEngine::monoNoteOff (int note, double deferBeats) noexcept
     {
         stackRemove (note);
+        monoSettle (deferBeats);
+    }
 
+    void GrainEngine::monoSettle (double deferBeats) noexcept
+    {
         // A key that comes up before its turn. With another key still down it is a move taken back,
         // and never happens. With none it is a tap: it still plays its length when its turn comes.
-        if (monoKey.active && monoKey.note == note)
+        if (monoKey.active && ! stackHolds (monoKey.note))
         {
             if (stackSize > 0)
             {
@@ -1045,7 +1281,7 @@ namespace grainlock
         auto& voice = voices[(size_t) monoVoice];
         if (voice.isWaiting())
         {
-            if (voice.getNote() == note)
+            if (! stackHolds (voice.getNote()))
             {
                 if (stackSize > 0)
                 {
@@ -1070,14 +1306,15 @@ namespace grainlock
 
         if (stackSize == 0)
         {
-            voice.release();
+            releaseVoice (voice, deferBeats);
         }
         else if (! monoKey.active && voice.getNote() != stackTop())
         {
             // Last-note priority: fall back to the most recent key still held. No key was pressed, so
-            // this does not wait.
+            // this does not wait. (The keys overlap, so Glide Legato glides.)
             const int glideSamples = (int) ((double) block.glideMs * sampleRate / 1000.0);
-            voice.retarget (stackTop(), -1.0f, glideSamples, false);
+            voice.retarget (stackTop(), -1.0f, glideSamples, false, block.glidePerOctave);
+            startHoldLength (voice);
         }
     }
 
@@ -1094,6 +1331,9 @@ namespace grainlock
         clearPendingGrabs();
         stackSize = 0;
         monoVoice = -1;
+        keysDown.fill (0);
+        pedalDown = false;
+        lastNote = -1;
     }
 
     void GrainEngine::killAll() noexcept
@@ -1104,6 +1344,9 @@ namespace grainlock
         clearFeedback();
         stackSize = 0;
         monoVoice = -1;
+        keysDown.fill (0);
+        pedalDown = false;
+        lastNote = -1;
     }
 
     bool GrainEngine::anyVoiceEngaged() const noexcept
@@ -1170,7 +1413,7 @@ namespace grainlock
         for (int k = 0; k < frame.numNotes; ++k)
             frame.notes[(size_t) k] = voices[(size_t) order[(size_t) k]].getNote();
 
-        if (monoMode)
+        if (monoMode && (block.holdMode == HoldMode::normal || block.holdMode == HoldMode::onGrid))
         {
             for (int s = 0; s < stackSize; ++s)
                 frame.setHeld (noteStack[(size_t) s]);

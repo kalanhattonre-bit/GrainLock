@@ -97,6 +97,15 @@ namespace grainlock::ParamID
     inline constexpr const char* skipChance = "skipChance";
     inline constexpr const char* feedback   = "feedback";
 
+    // 0.3: how notes are held and how many play.
+    inline constexpr const char* sustainPedal = "sustainPedal";
+    inline constexpr const char* holdMode     = "holdMode";
+    inline constexpr const char* holdTime     = "holdTime";
+    inline constexpr const char* glideLegato  = "glideLegato";
+    inline constexpr const char* glideRate    = "glideRate";
+    inline constexpr const char* polyGlide    = "polyGlide";
+    inline constexpr const char* voices       = "voices";
+
     /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
     inline constexpr const char* bypass      = "bypass";
 
@@ -116,7 +125,8 @@ namespace grainlock::ParamID
         bendUp, bendDown, vibRate, vibDepth,
         wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt,
         grabAt, wait, waitSync, offsetSync, refreshSync,
-        snap, threshold, maxWait, skipHiss, gate, gridGrabs, skipChance, feedback
+        snap, threshold, maxWait, skipHiss, gate, gridGrabs, skipChance, feedback,
+        sustainPedal, holdMode, holdTime, glideLegato, glideRate, polyGlide, voices
     };
 
     /** The parameter IDs of one LFO. */
@@ -176,6 +186,11 @@ namespace grainlock
     enum class ModSource   { wheel = 0, touch, expression };
     inline constexpr int numModSources = 3;
 
+    /** What ends a note. normal: the key (and the sustain pedal). latch: the next chord. onGrid: the
+        key, but on the next grid line. full: the note's own length, whatever the key does. */
+    enum class HoldMode    { normal = 0, latch, onGrid, full };
+    inline constexpr int numHoldModes = 4;
+
     /** What each LFO moves. Also the index of that LFO everywhere (ParamID::lfo, EngineParams::lfos, ...). */
     enum class LfoTarget   { pitch = 0, formant, grainCycles };
     inline constexpr int numLfos = 3;
@@ -214,6 +229,12 @@ namespace grainlock
 
     /** Threshold at the bottom of its range is off. */
     inline constexpr float thresholdOffDb = -80.0f;
+
+    /** Choice labels for Hold Time: the note values of grabSyncChoices() without "Free". */
+    const juce::StringArray& holdTimeChoices();
+
+    /** Length in quarter-note beats of a holdTimeChoices() index. */
+    double holdTimeBeats (int index) noexcept;
 
     /** Length of one LFO cycle in quarter-note beats for a sync index, or 0 for free-running. */
     double lfoSyncBeats (int syncIndex) noexcept;
@@ -280,6 +301,7 @@ namespace grainlock
         std::atomic<float> *bendUp, *bendDown, *vibRate, *vibDepth;
         std::atomic<float> *grabAt, *wait, *waitSync, *offsetSync, *refreshSync;
         std::atomic<float> *snap, *threshold, *maxWait, *skipHiss, *gate, *gridGrabs, *skipChance, *feedback;
+        std::atomic<float> *sustainPedal, *holdMode, *holdTime, *glideLegato, *glideRate, *polyGlide, *voices;
 
         std::atomic<float>* mix;
         std::atomic<float>* dryWhenIdle;

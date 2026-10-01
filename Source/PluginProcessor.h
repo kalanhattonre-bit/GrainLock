@@ -35,7 +35,9 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 5.0; }   // longest Release
+    // A frozen note sounds for as long as it is held (by a key, the pedal or Latch), with or without
+    // input, so the host must never stop calling because the input went quiet.
+    double getTailLengthSeconds() const override { return std::numeric_limits<double>::infinity(); }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }

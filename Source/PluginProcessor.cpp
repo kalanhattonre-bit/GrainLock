@@ -119,6 +119,14 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
     p.gridGrabs         = asBool (params.gridGrabs, d.gridGrabs);
     p.skipChancePercent = juce::jlimit (0.0f, 100.0f, value (params.skipChance, d.skipChancePercent));
     p.feedbackPercent   = juce::jlimit (0.0f, 100.0f, value (params.feedback, d.feedbackPercent));
+
+    p.sustainPedal      = asBool (params.sustainPedal, d.sustainPedal);
+    p.holdMode          = (HoldMode) juce::jlimit (0, numHoldModes - 1, asInt (params.holdMode, (int) d.holdMode));
+    p.holdTime          = juce::jlimit (0, 8, asInt (params.holdTime, d.holdTime));
+    p.glideLegato       = asBool (params.glideLegato, d.glideLegato);
+    p.glidePerOctave    = asBool (params.glideRate, d.glidePerOctave);
+    p.polyGlide         = asBool (params.polyGlide, d.polyGlide);
+    p.voices            = juce::jlimit (1, 8, asInt (params.voices, d.voices));
     return p;
 }
 
