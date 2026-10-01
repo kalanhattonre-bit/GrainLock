@@ -18,12 +18,13 @@ namespace grainlock
         int focusNote = -1;                     // the voice drawn in wave, -1 if none
         int loopCycles = 1;                     // note periods spanned by the drawn loop
         float seamFraction = 0.0f;              // shaded crossfade region at the end of the loop
-        std::array<float, 3> lfoValues {};      // each LFO's output scaled by its depth, -1..1 (pitch, formant, grain)
+        std::array<float, 3> lfoValues {};      // what each LFO adds on the drawn note, scaled by its depth and fade-in, -1..1 (pitch, formant, grain)
         std::array<bool, 3> lfoActive {};       // which LFOs are on
         bool hasWave = false;
         bool live = true;
         std::array<juce::uint64, 2> heldNotes {};   // bit n set = MIDI note n is held
         std::array<juce::uint64, 2> waitingNotes {};   // bit n set = a key that is down but has not grabbed yet
+        int waitingFor = 0;                         // why a waiting key waits: 0 its time (Wait, At Key, the loop after a hit), 1 a hit (Snap), 2 sound (Threshold)
         float offsetMs = 0.0f, waitMs = 0.0f;       // the Offset and Wait in use (a synced value may have been halved)
 
         bool isWaiting (int note) const noexcept

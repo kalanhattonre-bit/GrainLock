@@ -66,7 +66,11 @@ namespace grainlock
                 { formantLfoOn, 1.0f }, { formantLfoShape, sine }, { formantLfoRate, 0.15f }, { formantLfoDepth, 12.0f },
                 { velSens, 50.0f } } },
 
-            // 0.3 presets from here on. The five above are as they were in 0.2.
+            // 0.3 presets from here on. The five above set the same values as in 0.2. Picked from the
+            // menu they get 0.3's defaults for everything new: Auto Gain on, the mod wheel on vibrato,
+            // the sustain pedal on. So Stutter Gate (4 cycles) and Drone Pad (8 cycles) are up to 6 and
+            // 9 dB quieter than in 0.2 on a source at the note's own pitch. A 0.2 project keeps its
+            // 0.2 sound until a preset is picked again.
 
             // For drum loops: the loop starts on the hit nearest the key (within 40 ms either side),
             // not on whatever came before it.
@@ -81,8 +85,8 @@ namespace grainlock
                 { grainCycles, 3.0f }, { smooth, 8.0f }, { attack, 0.0f }, { release, 60.0f },
                 { keyUpMode, toGrid }, { noteLength, lengthSixteenth }, { spread, 60.0f }, { velSens, 60.0f } } },
 
-            // The frozen sound goes back into what is grabbed next, softened by Diffuse, so a chord
-            // keeps blooming after the input has moved on.
+            // The frozen sound goes back into what is grabbed next, so a chord keeps blooming after the
+            // input has moved on. Diffuse softens what is heard, not what goes back.
             { "Feedback Bloom", {
                 { captureMode, live }, { refresh, 60.0f }, { grainCycles, 4.0f }, { smooth, 30.0f },
                 { feedback, 75.0f }, { diffuse, 45.0f }, { lowCut, 120.0f }, { tilt, -1.5f }, { width, 40.0f },
@@ -104,8 +108,8 @@ namespace grainlock
                 { drift, 60.0f }, { spread, 70.0f }, { spreadMode, anywhere }, { width, 50.0f }, { hollow, 25.0f }, { diffuse, 35.0f },
                 { attack, 1200.0f }, { decay, 1500.0f }, { sustain, 90.0f }, { release, 3000.0f }, { velSens, 20.0f } } },
 
-            // For a voice: a key pressed in a gap waits for the next sound instead of freezing the
-            // silence, and breaths and "sss" are never grabbed.
+            // For a voice: a key pressed in a gap, on a breath or on an "sss" waits (up to 300 ms) for
+            // the next sung sound instead of freezing what is there, and a held note never re-grabs them.
             { "Breath Guard", {
                 { captureMode, live }, { threshold, -45.0f }, { maxWait, 300.0f }, { skipHiss, 1.0f },
                 { grainCycles, 2.0f }, { smooth, 20.0f }, { refresh, 30.0f },

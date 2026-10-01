@@ -197,8 +197,9 @@ namespace grainlock
         layout.add (boolParam (ParamID::dryWhenIdle, "Dry When Idle", true));
         layout.add (floatParam (ParamID::outGain, "Output Gain", Range (-24.0f, 24.0f, 0.1f), 0.0f, formatDb));
 
-        // 0.3. Every default leaves a 0.2 project sounding the same, except Auto Gain, which is on
-        // for new work and switched off when an older project is loaded (migratePre03State).
+        // 0.3. Every default leaves a 0.2 project sounding the same, except Auto Gain, the mod wheel's
+        // destination and the sustain pedal: those are on for new work and switched off when an older
+        // project is loaded (fillMissingParameters).
         layout.add (boolParam (ParamID::formantTrack, "Formant Key Follow", false));
         layout.add (boolParam (ParamID::autoGain, "Auto Gain", true));
 

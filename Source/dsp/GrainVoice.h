@@ -205,6 +205,9 @@ namespace grainlock
         bool isReleasing() const noexcept { return active && ! held && ! stealing; }
         /** Armed but not yet sounding. */
         bool isWaiting() const noexcept   { return active && waiting; }
+        /** For the display: what LFO i adds on this voice (value x depth x fade-in, -1..1) when the
+            voice runs that LFO itself (Starts at Voice or Once, or a Fade In). */
+        float shownLfo (int i) const noexcept { return lfoValue[(size_t) i]; }
         /** Sounding, and still on (held, or playing out the length of a key that came up while it
             waited): what holds the dry signal down for Dry When Idle. */
         bool isEngaged() const noexcept   { return active && ! stealing && ! waiting && (held || gateRemaining > 0); }

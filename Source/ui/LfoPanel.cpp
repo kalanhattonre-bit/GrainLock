@@ -55,13 +55,12 @@ namespace grainlock::ui
     void LfoPage::refresh()
     {
         const bool synced = juce::roundToInt (state.getRawParameterValue (ids.sync)->load()) != 0;
-        const bool free = juce::roundToInt (state.getRawParameterValue (ids.trig)->load()) == (int) LfoTrig::free;
 
         // S&H and Random take their values per cycle: Phase does not move them.
         const auto shapeNow = (LfoShape) juce::roundToInt (state.getRawParameterValue (ids.shape)->load());
         const bool stepped = shapeNow == LfoShape::sampleHold || shapeNow == LfoShape::random;
 
         rate.setAlpha (synced ? 0.45f : 1.0f);                         // Sync picks the speed
-        phase.setAlpha (stepped || (free && ! synced) ? 0.45f : 1.0f); // a free-running, unsynced LFO has no start to shift
+        phase.setAlpha (stepped ? 0.45f : 1.0f);                       // every other shape is read at Phase
     }
 }

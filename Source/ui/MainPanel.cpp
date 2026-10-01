@@ -329,18 +329,21 @@ namespace grainlock::ui
         }
 
         text << "  /  " << cycles << (cycles == 1 ? " CYCLE" : " CYCLES");
-        text << (lockOn ? "  /  PITCH LOCKED" : "  /  LOOP " + juce::String (cycles) + "X LONGER");
+        // (One cycle is one note period, Lock or no Lock: nothing is longer.)
+        text << (lockOn ? juce::String ("  /  PITCH LOCKED")
+                        : (cycles == 1 ? juce::String ("  /  LOCK OFF") : "  /  LOOP " + juce::String (cycles) + "X LONGER"));
         return text;
     }
 
     juce::String MainPanel::waitingText() const
     {
-        // Why a key that is down is not sounding yet.
-        if (plainValue (ParamID::threshold) > thresholdOffDb)
-            return "WAITING FOR SOUND";
-        if (plainValue (ParamID::snap) > 0.0f)
-            return "WAITING FOR A HIT";
-        return "WAITING TO GRAB";
+        // Why a key that is down is not sounding yet: the engine says which stage it is at.
+        switch (lastFrame.waitingFor)
+        {
+            case 2:  return "WAITING FOR SOUND";
+            case 1:  return "WAITING FOR A HIT";
+            default: return "WAITING TO GRAB";
+        }
     }
 
     void MainPanel::fade (const char* id, bool isLive)
@@ -407,6 +410,7 @@ namespace grainlock::ui
         for (const auto& source : ParamID::source)
             severalCycles = severalCycles || ((ModDest) index (source.dest) == ModDest::grain && plainValue (source.amount) > 0.0f);
         autoGain.setAlpha (on (ParamID::pitchLock) && severalCycles ? 1.0f : fadedAlpha);
+        fade (ParamID::pitchLock, severalCycles);   // one cycle is one note period either way
     }
 
     void MainPanel::tick (const ScopeFrame* frame)
