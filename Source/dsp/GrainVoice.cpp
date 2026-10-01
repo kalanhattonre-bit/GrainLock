@@ -41,6 +41,13 @@ namespace grainlock
         for (int i = 0; i < numLfos; ++i)
             ownLfos[(size_t) i].reset (lfoSeed (i));
         nudgeHistory = juce::nextPowerOfTwo ((int) std::ceil (2.0 * sampleRate) + 64);
+
+        const int shapeLength = juce::nextPowerOfTwo ((int) std::ceil (0.1 * sampleRate) + 8);
+        for (auto& channel : shapeLine)
+            channel.assign ((size_t) shapeLength, 0.0f);
+        shapeMask = shapeLength - 1;
+        shapeWrite = 0;
+        shapeFade = (float) (0.003 * sampleRate);
         kill();
     }
 
@@ -204,6 +211,8 @@ namespace grainlock
                 const float angle = (place + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
                 placeLeft = 1.41421356f * std::cos (angle);
                 placeRight = 1.41421356f * std::sin (angle);
+                if (std::abs (placeLeft) < 1.0e-6f)  placeLeft = 0.0f;    // hard right: cos (pi / 2) is not quite 0 in floats
+                if (std::abs (placeRight) < 1.0e-6f) placeRight = 0.0f;
             }
         }
 
@@ -612,6 +621,7 @@ namespace grainlock
     void GrainVoice::beginSounding (const VoiceContext& ctx, const CaptureSource& source, bool placed, int atKeyPart) noexcept
     {
         waiting = false;
+        shapeAge = 0;
         atKeySamples = juce::jmax (0, atKeyPart);
         keyGrabPlaced = placed;
         refreshClockStale = false;
@@ -885,47 +895,58 @@ namespace grainlock
         }
     }
 
-    void GrainVoice::renderShaped (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept
+    void GrainVoice::applyShape (const VoiceContext& ctx, double frequency, float& left, float& right) noexcept
     {
-        renderState (state, ctx, left, right);
+        // Always kept, so the controls have real history to work from the moment they are turned up.
+        const int at = shapeWrite;
+        shapeLine[0][(size_t) at] = left;
+        shapeLine[1][(size_t) at] = right;
+        shapeWrite = (shapeWrite + 1) & shapeMask;
+        if (shapeAge < shapeMask)
+            ++shapeAge;
 
         const float h = ctx.hollow, w = ctx.width;
         if (! (h > 0.0f || w > 0.0f))
             return;
 
-        // One note period, as a share of the loop: the whole loop with Pitch Lock on, one of its taps
-        // with it off.
-        const double period = state.lockOn ? 1.0 : 1.0 / (double) juce::jmax (1, state.taps);
-        PlayState shifted = state;
-        auto readAt = [this, &shifted, &state, &ctx, period] (double periods, float& l, float& r)
+        // One note period in samples, as far as the line reaches (it holds notes down to about 8 Hz).
+        const double period = juce::jlimit (2.0, (double) (shapeMask - 4) / 0.75, sampleRate / frequency);
+
+        // The voice's sound that many samples ago, and how far it can be trusted: 0 while the line
+        // still holds the note before, fading to 1 once this note has reached that far back.
+        auto earlier = [this, at] (double delay, float& l, float& r)
         {
-            double theta = state.theta + periods * period;
-            theta -= std::floor (theta);
-            shifted.theta = theta;
-            renderState (shifted, ctx, l, r);
+            const int whole = (int) delay;
+            const float part = (float) (delay - (double) whole);
+            const auto i0 = (size_t) ((at - whole) & shapeMask), i1 = (size_t) ((at - whole - 1) & shapeMask);
+            l = shapeLine[0][i0] + part * (shapeLine[0][i1] - shapeLine[0][i0]);
+            r = shapeLine[1][i0] + part * (shapeLine[1][i1] - shapeLine[1][i0]);
+            return juce::jlimit (0.0f, 1.0f, ((float) shapeAge - (float) delay) / shapeFade);
         };
 
-        // Hollow: the loop minus itself half a note period on. The even harmonics of the note thin
-        // out, the odd ones grow, and the level is brought back to where it was.
-        float scale = 1.0f;
+        // Hollow: the loop minus itself half a note period earlier. The even harmonics of the note
+        // thin out, the odd ones grow, and the level is brought back to where it was.
+        float hollow = 0.0f, scale = 1.0f;
         if (h > 0.0f)
         {
             float l = 0.0f, r = 0.0f;
-            readAt (0.5, l, r);
-            scale = 1.0f / std::sqrt (1.0f + h * h);
-            left = (left - h * l) * scale;
-            right = (right - h * r) * scale;
+            hollow = h * earlier (0.5 * period, l, r);
+            scale = 1.0f / std::sqrt (1.0f + hollow * hollow);
+            left = (left - hollow * l) * scale;
+            right = (right - hollow * r) * scale;
         }
 
-        // Width: the difference between the loop a quarter period on and a quarter period back, added
-        // to one side and taken from the other. Left plus right is exactly what it was, and neither
-        // side gets louder than the other, on any note.
+        // Width: the difference between the loop a quarter and three quarters of a period earlier,
+        // added to one side and taken from the other. Left plus right is exactly what it was. On a
+        // sound that repeats every note period (always, with Pitch Lock on) neither side gets louder
+        // than the other.
         if (w > 0.0f)
         {
             float al = 0.0f, ar = 0.0f, bl = 0.0f, br = 0.0f;
-            readAt (0.25, al, ar);
-            readAt (-0.25, bl, br);
-            const float side = 0.25f * ((al + ar) - (bl + br)) * (1.0f + h) * scale;   // Hollow leaves this part of the sound that much stronger
+            const float trustA = earlier (0.25 * period, al, ar);
+            const float trustB = earlier (0.75 * period, bl, br);
+            const float side = 0.25f * ((bl + br) - (al + ar)) * (1.0f + hollow) * scale   // Hollow leaves this part of the sound that much stronger
+                               * juce::jmin (trustA, trustB);
             left += w * side;
             right -= w * side;
         }
@@ -1208,7 +1229,7 @@ namespace grainlock
         {
             auto& now = states[(size_t) current];
             now.gain += gainSlew * (now.gainTarget - now.gain);
-            renderShaped (now, ctx, left, right);
+            renderState (now, ctx, left, right);
 
             if (ctx.feedbackOn)
             {
@@ -1223,7 +1244,7 @@ namespace grainlock
             float oldLeft = 0.0f, oldRight = 0.0f;
             auto& fading = states[(size_t) (1 - current)];
             fading.gain += gainSlew * (fading.gainTarget - fading.gain);
-            renderShaped (fading, ctx, oldLeft, oldRight);
+            renderState (fading, ctx, oldLeft, oldRight);
             const float oldScale = ctx.feedbackOn ? sendScale (fading) : 1.0f;
             advance (fading, frequency);
 
@@ -1242,6 +1263,9 @@ namespace grainlock
             if (++transition.position >= transition.length)
                 transition.active = false;
         }
+
+        // Hollow and Width shape what is heard. What Feedback sends back is the loop before them.
+        applyShape (ctx, frequency, left, right);
 
         const bool wrapped = advance (states[(size_t) current], frequency);
         samplesSinceCapture += 1.0;
@@ -1337,8 +1361,22 @@ namespace grainlock
         {
             shape.theta = (double) i / (double) numPoints;
             float left = 0.0f, right = 0.0f;
-            renderShaped (shape, ctx, left, right);
+            renderState (shape, ctx, left, right);
             dest[i] = 0.5f * (left + right);
+        }
+
+        // Hollow as it is heard: the loop minus itself half a note period earlier. (Width does not
+        // show: left and right are drawn as one line, and it leaves their sum alone.)
+        if (ctx.hollow > 0.0f && numPoints >= 4 && numPoints <= 1024)
+        {
+            std::array<float, 1024> plain;
+            for (int i = 0; i < numPoints; ++i)
+                plain[(size_t) i] = dest[i];
+
+            const int half = juce::jmax (1, numPoints / (2 * (shape.lockOn ? 1 : juce::jmax (1, shape.taps))));
+            const float h = ctx.hollow, scale = 1.0f / std::sqrt (1.0f + h * h);
+            for (int i = 0; i < numPoints; ++i)
+                dest[i] = (plain[(size_t) i] - h * plain[(size_t) ((i - half + numPoints) % numPoints)]) * scale;
         }
         return shape.lockOn ? 1 : shape.taps;
     }

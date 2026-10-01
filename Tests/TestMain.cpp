@@ -2465,13 +2465,13 @@ namespace
             // A key pressed exactly on a line: its own grab is the line's. A second grab a sample later
             // would crossfade two copies of the same slice.
             const auto steady = noiseInput (96000, 43, 0.25f);
-            auto run = [&steady] (bool grid)
+            auto run = [&steady] (bool useGrid)
             {
                 Harness h (48000.0, 256);
                 h.set (ParamID::dryWhenIdle, 0.0f);
                 h.set (ParamID::attack, 0.0f);
                 h.set (ParamID::refreshSync, 5.0f);
-                h.set (ParamID::gridGrabs, grid ? 1.0f : 0.0f);
+                h.set (ParamID::gridGrabs, useGrid ? 1.0f : 0.0f);
                 return play (h, steady, { keyDown (24000, 57) }, 0.0, 120.0);
             };
             const auto onGrid = run (true), offGrid = run (false);
@@ -2488,7 +2488,7 @@ namespace
             for (size_t i = 0; i < 30000; ++i)
                 cycled[i] = 0.0f;
 
-            auto firstSoundAt = [&cycled] (int block)
+            auto firstSoundCycled = [&cycled] (int block)
             {
                 Harness h (48000.0, block);
                 h.set (ParamID::dryWhenIdle, 0.0f);
@@ -2531,7 +2531,7 @@ namespace
                 h.proc.setPlayHead (nullptr);
                 return first;
             };
-            const int split = firstSoundAt (240), unsplit = firstSoundAt (256);
+            const int split = firstSoundCycled (240), unsplit = firstSoundCycled (256);
             check (split >= 48000 && split <= 48002 && unsplit == split,
                    fmt ("a host cycle of one grid line: sound that starts a quarter of the way through is picked up at the next return (sample %d, and %d when the block does not end on the wrap; the return is at 48000)",
                         split, unsplit));

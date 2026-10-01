@@ -708,11 +708,11 @@ namespace grainlock
         feedbackRight = out[1];
     }
 
-    void GrainEngine::advanceGrid (const VoiceContext& ctx, int sampleInBlock) noexcept
+    void GrainEngine::advanceGrid (const VoiceContext& ctx, int sample) noexcept
     {
         // The host gives the song position once per block; each sample's is worked out from it, so a
         // line lands on the same sample at any block size.
-        const double ppq = gridPpq + (double) sampleInBlock * gridPpqPerSample;
+        const double ppq = gridPpq + (double) sample * gridPpqPerSample;
         const auto index = (juce::int64) std::floor (ppq / gridBeats + 1.0e-9);
 
         if (! gridHasSeen)

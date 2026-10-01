@@ -228,7 +228,7 @@ namespace grainlock
         void clearPendingGrabs() noexcept;
 
         /** The song's grid: tells the Live voices when a line is crossed. */
-        void advanceGrid (const VoiceContext& ctx, int sampleInBlock) noexcept;
+        void advanceGrid (const VoiceContext& ctx, int sample) noexcept;
         /** Works out what the next input sample has added to it in the memory. */
         void updateFeedback (const FeedbackSend& send) noexcept;
         void clearFeedback() noexcept;

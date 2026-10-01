@@ -87,11 +87,11 @@ namespace grainlock
             target.diffuse = juce::jlimit (0.0f, 1.0f, target.diffuse);
 
             bool jumped = false;
-            auto jump = [&jumped] (float fade, float& value, float wanted)
+            auto jump = [&jumped] (float fade, float& value, float to)
             {
-                if (fade <= 0.0f && ! juce::exactlyEqual (value, wanted))
+                if (fade <= 0.0f && ! juce::exactlyEqual (value, to))
                 {
-                    value = wanted;
+                    value = to;
                     jumped = true;
                 }
             };

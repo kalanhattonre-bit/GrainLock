@@ -288,8 +288,10 @@ namespace grainlock
         void capture (GrainBuffer& grain, double frequency, const VoiceContext& ctx, const CaptureSource& source,
                       bool nudge = true) noexcept;
         void renderState (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
-        /** renderState with Hollow and Width applied: what is heard, and what the display draws. */
-        void renderShaped (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
+        /** Hollow and Width, on the voice's finished loop sound. Both work from a short memory of what
+            the voice has just played (a tenth of a second), so they cost a few reads, not a second and
+            third rendering of every cycle. Call it once per sample, whatever the two are set to. */
+        void applyShape (const VoiceContext& ctx, double frequency, float& left, float& right) noexcept;
         bool advance (PlayState& state, double frequency) const noexcept;
         /** firstRenderDelay: 0 when the new state is heard in this same sample, 1 when from the next. */
         void beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source, double firstRenderDelay) noexcept;
@@ -350,6 +352,12 @@ namespace grainlock
         float driftSemitones = 0.0f;
         float place = 0.0f, placeLeft = 1.0f, placeRight = 1.0f;   // -1 = left, 1 = right, and the gains for it
         bool offCentre = false;              // a place other than the centre is in use
+
+        // Hollow and Width: the last tenth of a second of this voice's own loop sound.
+        std::array<std::vector<float>, 2> shapeLine;
+        int shapeMask = 0, shapeWrite = 0;
+        int shapeAge = 0;                   // samples of this note in the line
+        float shapeFade = 144.0f;           // a delayed read fades in over this many samples once the note has reached it
         std::array<float, numLfos> lfoFade {};
         std::array<float, numLfos> lfoSmoothed {};
         EnvStage noteEnvStage = EnvStage::idle;
