@@ -43,6 +43,13 @@ namespace grainlock
             writePos = (writePos + 1) & mask;
         }
 
+        /** The mono sum of the sample delay samples before the newest one (0 = the newest). */
+        float monoAt (int delay) const noexcept
+        {
+            const auto i = (size_t) ((writePos - 1 - delay) & mask);
+            return 0.5f * (data[0][i] + data[1][i]);
+        }
+
         /** Copies count samples per channel. The last one copied lies endDelay samples
             before the newest pushed sample (endDelay 0 means it IS the newest). */
         void copyEnding (int endDelay, int count, float* destLeft, float* destRight) const noexcept

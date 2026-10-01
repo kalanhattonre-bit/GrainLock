@@ -9,6 +9,9 @@ namespace grainlock
         constexpr double halfPi = juce::MathConstants<double>::halfPi;
         constexpr double pi = juce::MathConstants<double>::pi;
         constexpr double maxSeam = 0.5;
+        constexpr double rootHz = 261.6255653005986;   // C3 (MIDI 60): where Formant Track leaves the formant alone
+        constexpr int seamPoints = 64;
+        constexpr int gainPointsFirst = 128, gainPointsRegrab = 48;
 
         // Built at load time, so the audio thread never runs a function-local static initialiser.
         const std::array<float, maxCycles + 1> invSqrtTable = []
@@ -43,6 +46,27 @@ namespace grainlock
         return std::isfinite (f) ? juce::jlimit (2.0, sampleRate * 0.25, f) : 440.0;
     }
 
+    void GrainVoice::updateShape (const VoiceContext& ctx, double frequency, double targetFrequency) noexcept
+    {
+        float track = 1.0f, trackTarget = 1.0f;
+        if (ctx.trackAmount > 0.0f)
+        {
+            // Like a sampler: a higher note reads the source faster, so its formants rise with it.
+            track = (float) (frequency / rootHz);
+            trackTarget = (float) (juce::jmax (frequency, targetFrequency) / rootHz);
+            if (ctx.trackAmount < 1.0f)   // only while the switch is fading
+            {
+                track = std::pow (track, ctx.trackAmount);
+                trackTarget = std::pow (trackTarget, ctx.trackAmount);
+            }
+        }
+
+        ratio = juce::jlimit (0.25f, 4.0f, ctx.formantRatio * track);
+        captureRatio = juce::jlimit (0.25f, 4.0f, ctx.captureRatioMax * juce::jmax (track, trackTarget));
+        if (! std::isfinite (ratio))        ratio = 1.0f;
+        if (! std::isfinite (captureRatio)) captureRatio = 1.0f;
+    }
+
     double GrainVoice::loopLengthSamples (const PlayState& state, double frequency) const noexcept
     {
         const double period = sampleRate / frequency;
@@ -74,12 +98,54 @@ namespace grainlock
         return ! grain.isEmpty() && need <= grain.span();
     }
 
+    int GrainVoice::nudgedEndDelay (const CaptureSource& source, double period, int cycles, bool lockOn) const noexcept
+    {
+        // The loop jumps from the end of the slice to one loop length before it. Within one note period
+        // further back there is usually a point where those two places match better, so the join is
+        // smoother before the seam fade does anything. A source already at the note's pitch matches
+        // everywhere, and stays where it is.
+        juce::ignoreUnused (lockOn);
+        const auto& ring = *source.ring;
+        const int base = source.offsetSamples;
+        const int loop = (int) std::lround ((double) juce::jlimit (minCycles, maxCycles, cycles) * period * (double) ratio);
+        const int reach = (int) std::ceil (period);
+        constexpr int window = 6;
+
+        if (loop < 4 || reach < 2 || base + reach + loop + window + 8 >= ring.size())
+            return base;
+
+        auto mismatch = [&ring, loop] (int delay)
+        {
+            double sum = 0.0;
+            for (int j = 0; j < window; ++j)
+            {
+                const double d = (double) ring.monoAt (delay + j) - (double) ring.monoAt (delay + j + loop);
+                sum += d * d;
+            }
+            return sum;
+        };
+
+        const int step = juce::jmax (1, reach / 32);
+        int best = base;
+        double bestMismatch = mismatch (base);
+        for (int delay = base + step; delay <= base + reach; delay += step)
+        {
+            const double m = mismatch (delay);
+            if (m < 0.7 * bestMismatch)   // only move for a clearly better join
+            {
+                bestMismatch = m;
+                best = delay;
+            }
+        }
+        return best;
+    }
+
     void GrainVoice::capture (GrainBuffer& grain, double frequency, const VoiceContext& ctx,
-                              const CaptureSource& source) noexcept
+                              const CaptureSource& source, bool nudge) noexcept
     {
         const double period = sampleRate / frequency;
         const double n = (double) juce::jlimit (minCycles, maxCycles, ctx.captureCyclesMax);
-        const double r = (double) ctx.captureRatioMax;
+        const double r = (double) captureRatio;
 
         // Pitch Lock on needs (N + seam) periods; off needs N * (1 + seam).
         const double lockOnNeed = (n + maxSeam) * period * r;
@@ -87,13 +153,96 @@ namespace grainlock
         const double span = ctx.captureBothLayouts ? juce::jmax (lockOnNeed, lockOffNeed)
                                                    : (ctx.pitchLock ? lockOnNeed : lockOffNeed);
 
-        const int ringLimit = source.ring->size() - source.offsetSamples - 8;
+        const int endDelay = nudge ? nudgedEndDelay (source, period, ctx.targetCycles, ctx.pitchLock) : source.offsetSamples;
+        const int ringLimit = source.ring->size() - endDelay - 8;
         const int limit = juce::jmin (grain.maxSpan(), ringLimit);
         const int spanSamples = (int) std::ceil (juce::jlimit (0.0, (double) limit, span));
 
-        grain.capture (*source.ring, source.offsetSamples, spanSamples, period);
+        grain.capture (*source.ring, endDelay, spanSamples, period);
         samplesSinceCapture = 0.0;
-        lastCaptureOffset = source.offsetSamples;
+        lastCaptureOffset = endDelay;
+    }
+
+    double GrainVoice::cycleLengthOf (const PlayState& state) const noexcept
+    {
+        // Source samples read per note period. If the formant asks for more than the grain holds,
+        // the read length is capped smoothly (the tap count never changes mid-note). The cap uses the
+        // widest seam, like the capture sizing, so moving Smooth never changes the timbre.
+        const auto& grain = grains[(size_t) state.grain];
+        const double available = grain.span();
+        const int n = state.taps;
+        const double fitLimit = state.lockOn ? available / ((double) n + maxSeam)
+                                             : available / ((double) n * (1.0 + maxSeam));
+        return juce::jmin (grain.capturePeriod() * (double) ratio, fitLimit);
+    }
+
+    void GrainVoice::measure (PlayState& state, const VoiceContext& ctx, int points, float blend) const noexcept
+    {
+        const auto& grain = grains[(size_t) state.grain];
+        const double c = cycleLengthOf (state);
+        const double seam = juce::jlimit (0.0, maxSeam, (double) ctx.smooth);
+        state.measuredCycle = c;
+        state.measuredSeam = ctx.smooth;
+        state.measuredAuto = ctx.autoGain;
+
+        float rho = 0.0f, gain = 1.0f;
+
+        if (! grain.isEmpty() && c > 0.0)
+        {
+            const int n = state.taps;
+            const double loop = state.lockOn ? c : (double) n * c;
+            const double back = (double) n * c;   // how far before the fading-out audio the fading-in audio lies
+
+            if (seam > 0.0)
+            {
+                double ab = 0.0, aa = 0.0, bb = 0.0;
+                for (int i = 0; i < seamPoints; ++i)
+                {
+                    const double p = -seam * loop * ((double) i + 0.5) / (double) seamPoints;
+                    float al = 0.0f, ar = 0.0f, bl = 0.0f, br = 0.0f;
+                    grain.read (p, al, ar);
+                    grain.read (p - back, bl, br);
+                    ab += (double) al * bl + (double) ar * br;
+                    aa += (double) al * al + (double) ar * ar;
+                    bb += (double) bl * bl + (double) br * br;
+                }
+
+                // Small values are measurement noise (unrelated audio reads about +/-0.12 here): ignore
+                // them, so noise-like material keeps the plain equal-power fade.
+                const double r = aa > 1.0e-20 && bb > 1.0e-20 ? ab / std::sqrt (aa * bb) : 0.0;
+                const double strength = (std::abs (r) - 0.15) / 0.85;
+                if (strength > 0.0)
+                    rho = (float) juce::jlimit (-0.5, 1.0, r < 0.0 ? -strength : strength);
+            }
+
+            if (ctx.autoGain && state.lockOn && n > 1)
+            {
+                double summed = 0.0, single = 0.0;
+                for (int i = 0; i < points; ++i)
+                {
+                    const double base = -c * ((double) i + 0.5) / (double) points;
+                    float sumL = 0.0f, sumR = 0.0f;
+                    for (int k = 0; k < n; ++k)
+                    {
+                        float a = 0.0f, b = 0.0f;
+                        grain.read (base - (double) k * c, a, b);
+                        sumL += a;
+                        sumR += b;
+                        single += (double) a * a + (double) b * b;
+                    }
+                    summed += (double) sumL * sumL + (double) sumR * sumR;
+                }
+
+                // The cycles are scaled by 1/sqrt(n): right when they are unrelated, too loud by up to
+                // sqrt(n) when they are alike (a source at the note's own pitch).
+                if (single > 1.0e-20)
+                    gain = (float) (1.0 / std::sqrt (juce::jlimit (1.0, (double) n, summed / single)));
+            }
+        }
+
+        const float b = juce::jlimit (0.0f, 1.0f, blend);
+        state.seamRho += b * (rho - state.seamRho);
+        state.gain += b * (gain - state.gain);
     }
 
     void GrainVoice::start (int midiNote, float velocityLevel, juce::uint64 order,
@@ -111,10 +260,20 @@ namespace grainlock
 
         current = 0;
         const int cycles = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
-        capture (grains[0], frequencyFor (pitch.value + (double) ctx.globalSemitones), ctx, source);
-        states[0] = PlayState { 0, cycles, tapsThatFit (grains[0], cycles, ctx.pitchLock, ctx.formantRatio), ctx.pitchLock, 0.0 };
-        states[1] = states[0];
+        const double frequency = frequencyFor (pitch.value + (double) ctx.globalSemitones);
+        updateShape (ctx, frequency, frequency);
+        capture (grains[0], frequency, ctx, source);
+
+        PlayState first;
+        first.grain = 0;
+        first.cycles = cycles;
+        first.taps = tapsThatFit (grains[0], cycles, ctx.pitchLock, ratio);
+        first.lockOn = ctx.pitchLock;
+        measure (first, ctx, gainPointsFirst, 1.0f);
+        states[0] = first;
+        states[1] = first;
         transition.active = false;
+        sinceMeasure = 0;
 
         envelope.reset();
         envelope.noteOn();
@@ -175,24 +334,27 @@ namespace grainlock
         if (grain.isEmpty())
             return;
 
-        const double available = grain.span();
         const double seam = juce::jlimit (0.0, maxSeam, (double) ctx.smooth);
         const int n = state.taps;
+        const double cycleLength = cycleLengthOf (state);
 
-        // Source samples read per note period. If the formant asks for more than the grain holds,
-        // the read length is capped smoothly (the tap count never changes mid-note). The cap uses the
-        // widest seam, like the capture sizing, so moving Smooth never changes the timbre.
-        const double fitLimit = state.lockOn ? available / ((double) n + maxSeam)
-                                             : available / ((double) n * (1.0 + maxSeam));
-        const double cycleLength = juce::jmin (grain.capturePeriod() * (double) ctx.formantRatio, fitLimit);
-
-        // Equal-power crossfade across the seam, into the audio just before the loop start.
+        // Crossfade across the seam, into the audio just before the loop start. Equal-power when the
+        // two sides are unrelated; when they are alike (seamRho towards 1) the pair is scaled so the
+        // power stays flat instead of bulging by up to 3 dB in the middle of the fade.
         float seamOut = 1.0f, seamIn = 0.0f;
         if (seam > 0.0 && state.theta >= 1.0 - seam)
         {
             const double u = (state.theta - (1.0 - seam)) / seam;
             seamOut = (float) std::cos (u * halfPi);
             seamIn = (float) std::sin (u * halfPi);
+
+            if (! juce::exactlyEqual (state.seamRho, 0.0f))
+            {
+                // sin(pi u) = 2 sin(pi u / 2) cos(pi u / 2)
+                const float k = 1.0f / std::sqrt (1.0f + 2.0f * state.seamRho * seamOut * seamIn);
+                seamOut *= k;
+                seamIn *= k;
+            }
         }
 
         float a = 0.0f, b = 0.0f;
@@ -221,7 +383,7 @@ namespace grainlock
                 sumR += seamIn * b;
             }
 
-            const float norm = invSqrtCycles (n);
+            const float norm = invSqrtCycles (n) * state.gain;
             left = sumL * norm;
             right = sumR * norm;
         }
@@ -294,7 +456,14 @@ namespace grainlock
         // Sized for the note being glided TO, so a slice is always its own note's wavelength.
         auto& grain = grains[(size_t) fresh.grain];
         capture (grain, frequencyFor (pitch.target + (double) ctx.globalSemitones), ctx, source);
-        fresh.taps = tapsThatFit (grain, fresh.cycles, fresh.lockOn, ctx.formantRatio);
+        fresh.taps = tapsThatFit (grain, fresh.cycles, fresh.lockOn, ratio);
+
+        // A re-grab of the same shape moves towards its new measurements, so noise in them does not
+        // become a level flutter at the Refresh rate; a different shape starts afresh.
+        const auto& before = states[(size_t) previous];
+        const bool sameShape = fresh.taps == before.taps && fresh.lockOn == before.lockOn;
+        measure (fresh, ctx, gainPointsRegrab, sameShape ? 0.3f : 1.0f);
+        sinceMeasure = 0;
 
         states[(size_t) next] = fresh;
         current = next;
@@ -314,7 +483,9 @@ namespace grainlock
         PlayState reshaped = before;
         reshaped.cycles = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
         reshaped.lockOn = ctx.pitchLock;
-        reshaped.taps = tapsThatFit (grains[(size_t) reshaped.grain], reshaped.cycles, reshaped.lockOn, ctx.formantRatio);
+        reshaped.taps = tapsThatFit (grains[(size_t) reshaped.grain], reshaped.cycles, reshaped.lockOn, ratio);
+        measure (reshaped, ctx, gainPointsFirst, 1.0f);
+        sinceMeasure = 0;
 
         const float correlation = correlationBetween (before, reshaped);
         states[(size_t) next] = reshaped;
@@ -334,9 +505,9 @@ namespace grainlock
         auto& grain = grains[(size_t) (1 - before.grain)];
 
         const double period = oldGrain.capturePeriod();
-        const double ratio = juce::jlimit (0.25, 4.0, juce::jmax ((double) ctx.formantRatio * 1.12, (double) ctx.captureRatioMax));
+        const double reach = juce::jlimit (0.25, 4.0, juce::jmax ((double) ratio * 1.12, (double) captureRatio));
         const double n = (double) juce::jlimit (minCycles, maxCycles, cycles);
-        const double span = juce::jmax ((n + maxSeam) * period * ratio, n * (1.0 + maxSeam) * period * ratio);
+        const double span = juce::jmax ((n + maxSeam) * period * reach, n * (1.0 + maxSeam) * period * reach);
 
         // The ring has long since overwritten the moment of a note held longer than it holds.
         if (samplesSinceCapture + (double) lastCaptureOffset >= (double) source.ring->size())
@@ -354,7 +525,9 @@ namespace grainlock
         extended.grain = 1 - before.grain;
         extended.cycles = juce::jlimit (minCycles, maxCycles, cycles);
         extended.lockOn = lockOn;
-        extended.taps = tapsThatFit (grain, extended.cycles, lockOn, ctx.formantRatio);
+        extended.taps = tapsThatFit (grain, extended.cycles, lockOn, ratio);
+        measure (extended, ctx, gainPointsFirst, 1.0f);
+        sinceMeasure = 0;
 
         const float correlation = correlationBetween (before, extended);
         states[(size_t) next] = extended;
@@ -369,6 +542,7 @@ namespace grainlock
             return;
 
         const double frequency = frequencyFor (pitch.next() + (double) ctx.globalSemitones);
+        updateShape (ctx, frequency, frequencyFor (pitch.target + (double) ctx.globalSemitones));
 
         if (! transition.active)
         {
@@ -385,7 +559,7 @@ namespace grainlock
             {
                 // A shape the grain cannot hold: Live grabs a fresh, bigger grain; Hold extends the
                 // frozen one backwards. Only when neither is possible does the shape squeeze in.
-                const bool holds = grainHolds (grain, wanted, ctx.pitchLock, ctx.formantRatio);
+                const bool holds = grainHolds (grain, wanted, ctx.pitchLock, ratio);
 
                 if (holds)
                     beginReshape (ctx);
@@ -394,7 +568,7 @@ namespace grainlock
                 else if (ctx.live || ! beginExtend (wanted, ctx.pitchLock, ctx, source))
                     beginReshape (ctx);
             }
-            else if (! ctx.live && ! grainHolds (grain, now.taps, now.lockOn, ctx.formantRatio))
+            else if (! ctx.live && ! grainHolds (grain, now.taps, now.lockOn, ratio))
             {
                 // Formant turned up past what the Hold grain holds.
                 beginExtend (now.cycles, now.lockOn, ctx, source);
@@ -427,6 +601,21 @@ namespace grainlock
 
         const bool wrapped = advance (states[(size_t) current], frequency);
         samplesSinceCapture += 1.0;
+        ++sinceMeasure;
+
+        // The measurements follow Formant, Smooth and the Auto Gain switch as they move: at a loop
+        // boundary, at most every 10 ms, and only when one of them has changed.
+        if (wrapped && ! transition.active && sinceMeasure >= (int) (0.01 * sampleRate))
+        {
+            auto& now = states[(size_t) current];
+            const double c = cycleLengthOf (now);
+            if (std::abs (c - now.measuredCycle) > 0.01 * now.measuredCycle
+                || std::abs (ctx.smooth - now.measuredSeam) > 0.01f || now.measuredAuto != ctx.autoGain)
+            {
+                measure (now, ctx, gainPointsRegrab, 0.5f);
+                sinceMeasure = 0;
+            }
+        }
 
         // Live: grab fresh audio at a loop boundary once Refresh has elapsed and the loop has
         // repeated at least twice (a loop that refreshes every pass is just a delay, not a pitch).

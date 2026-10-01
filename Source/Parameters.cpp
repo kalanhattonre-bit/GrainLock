@@ -143,6 +143,11 @@ namespace grainlock
         layout.add (boolParam (ParamID::dryWhenIdle, "Dry When Idle", true));
         layout.add (floatParam (ParamID::outGain, "Output Gain", Range (-24.0f, 24.0f, 0.1f), 0.0f, formatDb));
 
+        // 0.3. Every default leaves a 0.2 project sounding the same, except Auto Gain, which is on
+        // for new work and switched off when an older project is loaded (migratePre03State).
+        layout.add (boolParam (ParamID::formantTrack, "Formant Track", false));
+        layout.add (boolParam (ParamID::autoGain, "Auto Gain", true));
+
         // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
         layout.add (boolParam (ParamID::bypass, "Bypass", false));
 
@@ -183,6 +188,20 @@ namespace grainlock
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);
         bypass      = get (ParamID::bypass);
+
+        formantTrack = get (ParamID::formantTrack);
+        autoGain     = get (ParamID::autoGain);
+    }
+
+    void migratePre03State (juce::XmlElement& state)
+    {
+        for (auto* child : state.getChildWithTagNameIterator ("PARAM"))
+            if (child->getStringAttribute ("id") == ParamID::autoGain)
+                return;   // saved by 0.3 or later
+
+        auto* node = state.createNewChildElement ("PARAM");
+        node->setAttribute ("id", ParamID::autoGain);
+        node->setAttribute ("value", 0.0);
     }
 
     void migrateLegacyLfoState (juce::XmlElement& state)

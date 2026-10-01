@@ -11,7 +11,9 @@ namespace grainlock
     {
         double sampleRate = 48000.0;
         float globalSemitones = 0.0f;   // tune + fine + pitch bend + LFO pitch
-        float formantRatio = 1.0f;      // source read rate within each note period
+        float formantRatio = 1.0f;      // source read rate within each note period, before key tracking
+        float trackAmount = 0.0f;       // 0..1: how far each voice's formant follows its own pitch (root C3)
+        bool autoGain = false;          // keep a loop as loud as the slice it came from
         float smooth = 0.1f;            // seam crossfade, fraction of the loop (0..0.5)
         float sustain = 1.0f;           // envelope sustain level, smoothed
         int targetCycles = 2;           // grain cycles after LFO modulation
@@ -82,6 +84,14 @@ namespace grainlock
             int taps = 2;           // cycles the grain actually holds (fixed for the life of the state)
             bool lockOn = true;
             double theta = 0.0;     // position through the loop, 0..1
+
+            // Measured on the grain (see measure()): how alike the two sides of the seam are, and how
+            // much louder the summed cycles are than one of them.
+            float seamRho = 0.0f;
+            float gain = 1.0f;
+            double measuredCycle = 0.0;   // the settings the measurement was made for
+            float measuredSeam = -1.0f;
+            bool measuredAuto = false;
         };
 
         /** Linear glide in semitones, in double so long glides land exactly on the note. */
@@ -112,9 +122,18 @@ namespace grainlock
         };
 
         double frequencyFor (double semitones) const noexcept;
+        /** Works out this voice's own formant ratio and capture budget for the pitch it sounds at
+            (and the pitch it is gliding to). */
+        void updateShape (const VoiceContext& ctx, double frequency, double targetFrequency) noexcept;
         int tapsThatFit (const GrainBuffer& grain, int cycles, bool lockOn, float formantRatio) const noexcept;
         bool grainHolds (const GrainBuffer& grain, int cycles, bool lockOn, float formantRatio) const noexcept;
-        void capture (GrainBuffer& grain, double frequency, const VoiceContext& ctx, const CaptureSource& source) noexcept;
+        double cycleLengthOf (const PlayState& state) const noexcept;
+        /** Measures the seam correlation and the Auto Gain of a play state on its grain. blend 1
+            replaces the previous values; less than 1 moves towards the new ones (Live re-grabs). */
+        void measure (PlayState& state, const VoiceContext& ctx, int points, float blend) const noexcept;
+        int nudgedEndDelay (const CaptureSource& source, double period, int cycles, bool lockOn) const noexcept;
+        void capture (GrainBuffer& grain, double frequency, const VoiceContext& ctx, const CaptureSource& source,
+                      bool nudge = true) noexcept;
         void renderState (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
         bool advance (PlayState& state, double frequency) const noexcept;
         void beginRecapture (double soundingFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept;
@@ -141,6 +160,9 @@ namespace grainlock
         Glide pitch;
 
         double sampleRate = 48000.0;
+        float ratio = 1.0f;                 // this voice's formant ratio right now (global x key tracking)
+        float captureRatio = 1.0f;          // the most formant this voice's next grab must hold
+        int sinceMeasure = 0;
         double samplesSinceCapture = 0.0;   // how long ago the current grain's frozen instant was
         int lastCaptureOffset = 0;          // the Offset (in samples) that instant was taken with
         bool pendingRecapture = false;

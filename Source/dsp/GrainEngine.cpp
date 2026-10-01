@@ -27,6 +27,7 @@ namespace grainlock
         sustain.reset (sampleRate, 0.02);
         outGain.reset (sampleRate, 0.02);
         bypassFade.reset (sampleRate, 0.02);
+        trackAmount.reset (sampleRate, 0.03);
 
         limiter.prepare (sampleRate);
         // Different seeds, so S&H on two LFOs never steps in lockstep.
@@ -89,6 +90,7 @@ namespace grainlock
             sustain.setCurrentAndTargetValue (params.sustainPercent / 100.0f);
             outGain.setCurrentAndTargetValue (gain);
             bypassFade.setCurrentAndTargetValue (params.bypass ? 1.0f : 0.0f);
+            trackAmount.setCurrentAndTargetValue (params.formantTrack ? 1.0f : 0.0f);
             firstBlock = false;
         }
         else
@@ -106,6 +108,7 @@ namespace grainlock
             sustain.setTargetValue (params.sustainPercent / 100.0f);
             outGain.setTargetValue (gain);
             bypassFade.setTargetValue (params.bypass ? 1.0f : 0.0f);
+            trackAmount.setTargetValue (params.formantTrack ? 1.0f : 0.0f);
         }
 
         offsetSamples = juce::jlimit (0, (int) (0.5 * sampleRate), (int) std::lround (params.offsetMs * sampleRate / 1000.0));
@@ -178,6 +181,8 @@ namespace grainlock
 
         ctx.globalSemitones = tuneSemis.getNextValue() + bendSemis.getNextValue() + lfoPitch;
         ctx.formantRatio = juce::jlimit (0.25f, 4.0f, std::exp2 ((formantSemis.getNextValue() + lfoFormant) / 12.0f));
+        ctx.trackAmount = trackAmount.getNextValue();
+        ctx.autoGain = block.autoGain;
         ctx.smooth = smoothFraction.getNextValue();
         ctx.sustain = sustain.getNextValue();
         ctx.targetCycles = juce::jlimit (minCycles, maxCycles, juce::roundToInt ((float) block.grainCycles + lfoCycles));

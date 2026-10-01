@@ -914,6 +914,177 @@ namespace
         check (maxDiff (off + 4800, out.size()) > 0.05f, "bypass lifted with the key still held: the frozen note is still sounding");
     }
 
+    //==========================================================================
+    // 0.3
+
+    /** Level (dB) of the spectral line nearest hz in the last 2^order samples of x (Hann window). */
+    double lineLevelDb (const std::vector<float>& x, double sampleRate, double hz, int order = 15)
+    {
+        const int n = 1 << order;
+        std::vector<float> buf ((size_t) (2 * n), 0.0f);
+        const size_t start = x.size() - (size_t) n;
+        for (int i = 0; i < n; ++i)
+            buf[(size_t) i] = x[start + (size_t) i] * (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / (n - 1)));
+        juce::dsp::FFT fft (order);
+        fft.performFrequencyOnlyForwardTransform (buf.data());
+        const int k = (int) std::lround (hz * n / sampleRate);
+        float peak = 0.0f;
+        for (int j = std::max (1, k - 2); j <= std::min (n / 2 - 1, k + 2); ++j)
+            peak = std::max (peak, buf[(size_t) j]);
+        return 20.0 * std::log10 (std::max (1.0e-12f, peak));
+    }
+
+    double rmsDb (const std::vector<float>& x, size_t from, size_t to)
+    {
+        double s = 0.0;
+        for (size_t i = from; i < to; ++i) s += (double) x[i] * x[i];
+        return 10.0 * std::log10 (std::max (1.0e-20, s / (double) std::max<size_t> (1, to - from)));
+    }
+
+    void testSeamFlatPower()
+    {
+        section ("0.3 G21: a source at the note's own pitch loops without a bump at the seam");
+
+        // A pure 220 Hz sine frozen on A2 (220 Hz) with one cycle and a 25% seam. The two sides of the
+        // seam are the same audio, so a plain equal-power fade swells by 3 dB there once per cycle,
+        // which adds harmonics to a sine. A flat-power seam leaves a sine a sine.
+        Harness h (48000.0, 512);
+        h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+        h.set (ParamID::grainCycles, 1.0f);
+        h.set (ParamID::smooth, 25.0f);
+        std::vector<float> out;
+        h.runSignal (96000, { noteOnAt (24000, 57, 127) },
+                     [] (juce::int64 t, int) { return 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * (double) t / 48000.0); }, &out);
+
+        const double fundamental = lineLevelDb (out, 48000.0, 220.0);
+        double worst = -200.0;
+        for (int harmonic = 2; harmonic <= 6; ++harmonic)
+            worst = std::max (worst, lineLevelDb (out, 48000.0, 220.0 * harmonic) - fundamental);
+        check (worst <= -50.0, fmt ("sine in, sine out: strongest added harmonic %.1f dB under the fundamental (limit -50)", worst));
+    }
+
+    void testAutoGain()
+    {
+        section ("0.3 G33: Auto Gain keeps the level when Grain changes");
+
+        // Eight harmonics of 220 Hz, frozen on A2: every cycle is alike, the worst case for level.
+        auto source = [] (juce::int64 t, int)
+        {
+            double s = 0.0;
+            for (int k = 1; k <= 8; ++k)
+                s += std::sin (juce::MathConstants<double>::twoPi * 220.0 * k * (double) t / 48000.0 + 0.7 * k) / k;
+            return (float) (0.03 * s);
+        };
+
+        auto level = [&source] (float cycles, bool autoGain)
+        {
+            Harness h (48000.0, 512);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, cycles);
+            h.set (ParamID::autoGain, autoGain ? 1.0f : 0.0f);
+            std::vector<float> out;
+            h.runSignal (96000, { noteOnAt (48000, 57, 127) }, source, &out);
+            return rmsDb (out, 72000, 96000);
+        };
+
+        const double rise = level (16.0f, false) - level (1.0f, false);
+        const double held = level (16.0f, true) - level (1.0f, true);
+        check (rise >= 9.0, fmt ("Auto Gain off: Grain 16 is %.1f dB louder than Grain 1 on a source at the note's pitch (the fault: about 12)", rise));
+        check (std::abs (held) <= 1.5, fmt ("Auto Gain on: Grain 16 is within %.2f dB of Grain 1 (limit 1.5)", held));
+
+        // Noise has unrelated cycles, so Auto Gain must leave it (almost) alone.
+        auto noiseLevel = [] (bool autoGain)
+        {
+            Harness h (48000.0, 512);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, 8.0f);
+            h.set (ParamID::autoGain, autoGain ? 1.0f : 0.0f);
+            juce::Random rng (77);
+            std::vector<float> out;
+            h.run (96000, { noteOnAt (48000, 57, 127) }, 0.2f, &out, nullptr, rng);
+            return rmsDb (out, 72000, 96000);
+        };
+        const double noiseChange = noiseLevel (true) - noiseLevel (false);
+        check (std::abs (noiseChange) <= 1.0, fmt ("noise at Grain 8: Auto Gain changes the level by %.2f dB (limit 1)", noiseChange));
+    }
+
+    void testFormantTrack()
+    {
+        section ("0.3 G09: the Formant Track switch makes the tone follow the key");
+
+        // Noise with one resonance at 1 kHz. Frozen an octave above the root (C4), tracking reads the
+        // source twice as fast, so the resonance moves to 2 kHz; with the switch off it stays put.
+        std::vector<float> source ((size_t) 96000);
+        {
+            juce::Random rng (31);
+            const double w = juce::MathConstants<double>::twoPi * 1000.0 / 48000.0, r = 0.985;
+            double y1 = 0.0, y2 = 0.0;
+            for (auto& v : source)
+            {
+                const double x = rng.nextDouble() * 2.0 - 1.0;
+                const double y = x + 2.0 * r * std::cos (w) * y1 - r * r * y2;
+                y2 = y1;
+                y1 = y;
+                v = (float) (0.004 * y);
+            }
+        }
+
+        auto bandBalance = [&source] (bool track)
+        {
+            Harness h (48000.0, 512);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, 8.0f);
+            h.set (ParamID::formantTrack, track ? 1.0f : 0.0f);
+            std::vector<float> out;
+            h.runSignal (96000, { noteOnAt (48000, 72, 127) },
+                         [&source] (juce::int64 t, int) { return source[(size_t) t]; }, &out);
+
+            // Energy near 2 kHz against energy near 1 kHz, from the note's harmonics (C4 = 523.25 Hz).
+            const double f0 = 440.0 * std::pow (2.0, (72 - 69) / 12.0);
+            auto power = [&] (int harmonic) { return std::pow (10.0, lineLevelDb (out, 48000.0, f0 * harmonic) / 10.0); };
+            return 10.0 * std::log10 ((power (4) + power (3)) / (power (2) + power (1) * 0.5));
+        };
+
+        const double off = bandBalance (false), on = bandBalance (true);
+        check (off < -6.0 && on > 6.0,
+               fmt ("C4 over a 1 kHz resonance: energy at 2 kHz against 1 kHz is %+.1f dB with the switch off and %+.1f dB with it on", off, on));
+    }
+
+    void testPre03Session()
+    {
+        section ("0.3: a project saved by 0.2 keeps its level (Auto Gain off); new work has it on");
+
+        GrainLockProcessor fresh;
+        const bool freshOn = fresh.apvts.getRawParameterValue (ParamID::autoGain)->load() >= 0.5f;
+
+        // What 0.2 saved: every parameter except the ones 0.3 added.
+        auto xml = fresh.apvts.copyState().createXml();
+        juce::Array<juce::XmlElement*> added;
+        for (auto* node : xml->getChildWithTagNameIterator ("PARAM"))
+            if (node->getStringAttribute ("id") == ParamID::autoGain || node->getStringAttribute ("id") == ParamID::formantTrack)
+                added.add (node);
+        for (auto* node : added)
+            xml->removeChildElement (node, true);
+        juce::MemoryBlock block;
+        juce::AudioProcessor::copyXmlToBinary (*xml, block);
+
+        GrainLockProcessor old;
+        old.setStateInformation (block.getData(), (int) block.getSize());
+        const bool oldOff = old.apvts.getRawParameterValue (ParamID::autoGain)->load() < 0.5f;
+        const bool trackOff = old.apvts.getRawParameterValue (ParamID::formantTrack)->load() < 0.5f;
+
+        // And a 0.3 state keeps whatever it saved.
+        juce::MemoryBlock saved;
+        fresh.getStateInformation (saved);
+        GrainLockProcessor again;
+        again.setStateInformation (saved.getData(), (int) saved.getSize());
+        const bool keptOn = again.apvts.getRawParameterValue (ParamID::autoGain)->load() >= 0.5f;
+
+        check (freshOn && oldOff && trackOff && keptOn,
+               fmt ("new instance on (%d), 0.2 project off (%d) with Formant Track off (%d), 0.3 project keeps on (%d)",
+                    (int) freshOn, (int) oldOff, (int) trackOff, (int) keptOn));
+    }
+
     void testLfoSyncedSampleHold()
     {
         section ("Extra: tempo-synced S&H steps once per division");
@@ -1298,6 +1469,13 @@ int main (int argc, char** argv)
         testHostGarbage();
         testThreeLfosTogether();
         testLegacyLfoMigration();
+    }
+    if (wants ("v03"))
+    {
+        testSeamFlatPower();
+        testAutoGain();
+        testFormantTrack();
+        testPre03Session();
     }
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);

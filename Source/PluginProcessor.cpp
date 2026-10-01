@@ -80,6 +80,9 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
     p.dryWhenIdle      = asBool (params.dryWhenIdle, d.dryWhenIdle);
     p.outGainDb        = value (params.outGain, d.outGainDb);
     p.bypass           = asBool (params.bypass, false);
+
+    p.formantTrack     = asBool (params.formantTrack, d.formantTrack);
+    p.autoGain         = asBool (params.autoGain, d.autoGain);
     return p;
 }
 
@@ -181,6 +184,7 @@ void GrainLockProcessor::setStateInformation (const void* data, int sizeInBytes)
         if (xml->hasTagName (apvts.state.getType()))
         {
             migrateLegacyLfoState (*xml);   // v0.1 saved one shared LFO; move it onto the matching new one
+            migratePre03State (*xml);       // older projects keep their level: Auto Gain off
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
         }
     }

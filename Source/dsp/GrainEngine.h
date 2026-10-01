@@ -44,6 +44,9 @@ namespace grainlock
         bool dryWhenIdle = true;
         float outGainDb = 0.0f;
         bool bypass = false;         // the host's bypass switch: fade to the untouched input
+
+        bool formantTrack = false;   // each voice's formant follows its own pitch (root C3)
+        bool autoGain = true;        // a loop stays as loud as the slice it came from
     };
 
     /** What the host said about tempo and position for this block. */
@@ -108,7 +111,7 @@ namespace grainlock
 
         // Smoothed continuous controls.
         juce::SmoothedValue<float> tuneSemis, bendSemis, formantSemis, smoothFraction;
-        juce::SmoothedValue<float> mix, sustain, bypassFade;
+        juce::SmoothedValue<float> mix, sustain, bypassFade, trackAmount;
         std::array<juce::SmoothedValue<float>, numLfos> lfoDepth;   // 0 when that LFO is off, so switching fades
         std::array<juce::SmoothedValue<float>, numLfos> lfoRate;
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outGain { 1.0f };

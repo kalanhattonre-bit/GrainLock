@@ -44,6 +44,10 @@ namespace grainlock::ParamID
     inline constexpr const char* dryWhenIdle = "dryWhenIdle";
     inline constexpr const char* outGain     = "outGain";
 
+    // 0.3
+    inline constexpr const char* formantTrack = "formantTrack";
+    inline constexpr const char* autoGain     = "autoGain";
+
     /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
     inline constexpr const char* bypass      = "bypass";
 
@@ -54,7 +58,8 @@ namespace grainlock::ParamID
         pitchLfoOn, pitchLfoRate, pitchLfoSync, pitchLfoShape, pitchLfoDepth,
         formantLfoOn, formantLfoRate, formantLfoSync, formantLfoShape, formantLfoDepth,
         grainLfoOn, grainLfoRate, grainLfoSync, grainLfoShape, grainLfoDepth,
-        mix, dryWhenIdle, outGain
+        mix, dryWhenIdle, outGain,
+        formantTrack, autoGain
     };
 
     /** The five parameter IDs of one LFO. */
@@ -104,6 +109,10 @@ namespace grainlock
         settings land on the LFO for the target it pointed at. States without the old IDs pass through. */
     void migrateLegacyLfoState (juce::XmlElement& state);
 
+    /** A state saved before 0.3 has no Auto Gain value. Auto Gain is on for new work, but an old
+        project must sound as it did, so such a state gets it switched off. */
+    void migratePre03State (juce::XmlElement& state);
+
     /** Note name as Cubase shows it by default (middle C, MIDI 60, is C3). */
     juce::String formatNoteName (int midiNote);
 
@@ -143,5 +152,8 @@ namespace grainlock
         std::atomic<float>* dryWhenIdle;
         std::atomic<float>* outGain;
         std::atomic<float>* bypass;
+
+        std::atomic<float>* formantTrack;
+        std::atomic<float>* autoGain;
     };
 }
