@@ -67,6 +67,16 @@ namespace grainlock
         int offsetSync = 0;
         int refreshSync = 0;         // index into lfoSyncChoices(); 0 = the ms knob
 
+        // What a note will and will not grab
+        float snapMs = 0.0f;                  // 0 = off
+        float thresholdDb = thresholdOffDb;   // at the bottom of its range the threshold is off
+        float maxWaitMs = 500.0f;
+        bool skipHiss = false;
+        bool gate = false;
+        bool gridGrabs = false;               // Live re-grabs land on the song's grid (needs Refresh Sync)
+        float skipChancePercent = 0.0f;
+        float feedbackPercent = 0.0f;
+
         // Keyboard
         int bendUp = 2, bendDown = 2;    // semitones
         float vibRateHz = 5.5f;
@@ -138,22 +148,40 @@ namespace grainlock
         /** The only place input reaches the memory: also advances the sample clock. */
         void pushInput (float left, float right) noexcept;
 
-        /** A grab that has been asked for and may have to wait (Wait, At Key). */
+        /** A grab that has been asked for and may have to wait (Wait, At Key, Snap, Threshold). */
         struct PendingGrab
         {
             bool active = false;
             juce::int64 planEnd = 0;   // where the slice ends, on the sample clock (may lie before the key)
             juce::int64 dueTime = 0;   // the first moment the grab can happen: max(key, planEnd)
-            bool placed = false;       // the spot was chosen on purpose (At Key): no loop-point nudge
+            bool placed = false;       // the spot was chosen on purpose (At Key, Snap): no loop-point nudge
+
+            juce::int64 centre = 0;    // key + Wait - Offset: where Snap looks for a hit
+            juce::int64 giveUp = 0;    // Threshold: by now the grab happens whatever the input does
+            int region = 0;            // source samples the loop will read
+            int atKeyPart = 0;         // At Key: how much later than the Offset says the slice ends (the region)
+            bool anchored = false;     // Snap found a hit: the region starts there
+            bool unsnapped = false;    // Snap's window passed with no hit
         };
 
-        /** Works out when a key pressed now grabs. Returns true when that is right away. */
+        /** Works out when a key pressed now grabs. Returns true when that is right away, with nothing
+            to wait for or to look at. */
         bool planGrab (int slot, int note, const VoiceContext& ctx, PendingGrab& plan) noexcept;
+        /** A planned grab, asked every sample from its due time on: true = grab now (endDelay and
+            placed say where); drop = forget the note instead. */
+        bool grabReady (PendingGrab& plan, bool keyDown, int& endDelay, bool& placed, bool& drop) noexcept;
+        int endDelayFor (juce::int64 sliceEnd) const noexcept;
         void startArmedVoice (int slot, const VoiceContext& ctx) noexcept;
-        void fireGrab (int slot, const VoiceContext& ctx, const PendingGrab& plan) noexcept;
-        void fireMonoKey (const VoiceContext& ctx) noexcept;
+        void fireGrab (int slot, const VoiceContext& ctx, int endDelay, bool placed, int atKeyPart) noexcept;
+        void fireMonoKey (const VoiceContext& ctx, int endDelay, bool placed) noexcept;
         void servePendingGrabs (const VoiceContext& ctx) noexcept;
         void clearPendingGrabs() noexcept;
+
+        /** The song's grid: tells the Live voices when a line is crossed. */
+        void advanceGrid (const VoiceContext& ctx, int sampleInBlock) noexcept;
+        /** Works out what the next input sample has added to it in the memory. */
+        void updateFeedback (const FeedbackSend& send) noexcept;
+        void clearFeedback() noexcept;
         void publishScope (const VoiceContext& ctx) noexcept;
 
         void stackRemove (int note) noexcept;
@@ -164,6 +192,7 @@ namespace grainlock
         bool prepared = false;
 
         InputRing ring;
+        InputTracker tracker;           // the dry input's level, hiss and hits: never hears Feedback
         std::array<GrainVoice, numVoiceSlots> voices;
         std::array<Lfo, numLfos> lfos;
         SoftLimiter limiter;
@@ -202,9 +231,35 @@ namespace grainlock
             int note = 60;
             float level = 1.0f;
             PendingGrab grab;
+
+            // A tap: the key came up before its turn, with no other key down. It still plays its length.
+            juce::int64 pressedAt = 0;
+            bool released = false;
+            int heldFor = 0;
         } monoKey;
         std::array<double, numLfos> lfoIncrement {};
         std::array<bool, numLfos> lfoSynced {};
+
+        // What a note will and will not grab.
+        int snapSamples = 0;
+        int maxWaitSamples = 0;
+        float thresholdLevel = 0.0f;    // linear; 0 = off
+        bool stickyLive = false;        // a Live grain may outlive a refresh
+        float gateGain = 1.0f, gateUp = 0.004f, gateDown = 0.0004f;
+
+        // The grid.
+        bool gridActive = false;
+        bool gridHasSeen = false;
+        double gridBeats = 1.0, gridPpq = 0.0, gridPpqPerSample = 0.0;
+        juce::int64 gridLastSeen = 0, gridLastFired = 0, gridSinceFire = 0;
+        int gridHalfLine = 1;
+
+        // Feedback: what the last sample's voices put back into the input memory.
+        juce::SmoothedValue<float> feedback;
+        bool feedbackActive = false;
+        float feedbackLeft = 0.0f, feedbackRight = 0.0f;
+        std::array<float, 2> feedbackDcIn {}, feedbackDcOut {}, feedbackLow {};
+        float feedbackDcCoeff = 0.997f, feedbackLowCoeff = 0.5f;
         float captureRatioMax = 1.0f;
         int captureCyclesMax = 2;
         bool captureBothLayouts = false;

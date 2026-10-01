@@ -110,6 +110,15 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
     p.waitSync         = asInt (params.waitSync, d.waitSync);
     p.offsetSync       = asInt (params.offsetSync, d.offsetSync);
     p.refreshSync      = asInt (params.refreshSync, d.refreshSync);
+
+    p.snapMs            = juce::jlimit (0.0f, 100.0f, value (params.snap, d.snapMs));
+    p.thresholdDb       = juce::jlimit (thresholdOffDb, -10.0f, value (params.threshold, d.thresholdDb));
+    p.maxWaitMs         = juce::jlimit (0.0f, 2000.0f, value (params.maxWait, d.maxWaitMs));
+    p.skipHiss          = asBool (params.skipHiss, d.skipHiss);
+    p.gate              = asBool (params.gate, d.gate);
+    p.gridGrabs         = asBool (params.gridGrabs, d.gridGrabs);
+    p.skipChancePercent = juce::jlimit (0.0f, 100.0f, value (params.skipChance, d.skipChancePercent));
+    p.feedbackPercent   = juce::jlimit (0.0f, 100.0f, value (params.feedback, d.feedbackPercent));
     return p;
 }
 

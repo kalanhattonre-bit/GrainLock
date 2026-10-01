@@ -2,6 +2,7 @@
 
 #include "Envelope.h"
 #include "GrainBuffer.h"
+#include "InputTracker.h"
 #include "Lfo.h"
 #include "../Parameters.h"
 
@@ -69,6 +70,22 @@ namespace grainlock
         ModSettings mods;
         float wheel = 0.0f, pressure = 0.0f, expression = 1.0f;   // smoothed, 0..1; these are their rest values
         float vibrato = 0.0f;                                     // the shared vibrato wave, -1..1
+
+        // What a Live note will and will not re-grab.
+        const InputTracker* tracker = nullptr;   // the dry input's level history
+        float threshold = 0.0f;         // linear level a slice must reach throughout; 0 = off
+        bool skipHiss = false;
+        float skipChance = 0.0f;        // 0..1
+        bool gridActive = false;        // re-grabs come from the song's grid lines, not from the Refresh clock
+        bool stickyLive = false;        // a Live grain may outlive a refresh, so it is kept and extended like a Hold one
+        bool feedbackOn = false;        // voices also hand over what goes back into the input memory
+    };
+
+    /** What the voices send back into the input memory (Feedback), summed over one sample. */
+    struct FeedbackSend
+    {
+        float left = 0.0f, right = 0.0f;
+        float weight = 0.0f;   // the voices' own levels added up, so a chord sends no more than one note does
     };
 
     /** Where a voice grabs audio from: the input ring, ending offsetSamples before now. */
@@ -107,7 +124,7 @@ namespace grainlock
         /** The armed voice makes its grab and starts to sound. Every per-note clock (the envelopes, a
             per-voice LFO's phase, an LFO's fade-in) starts here, not at the key. source says where the
             slice ends; placed means that spot was chosen on purpose (At Key), so it is not nudged. */
-        void beginSounding (const VoiceContext& ctx, const CaptureSource& source, bool placed = false) noexcept;
+        void beginSounding (const VoiceContext& ctx, const CaptureSource& source, bool placed = false, int atKeyPart = 0) noexcept;
 
         /** Source samples the loop region of midiNote would cover on this voice (its cycles x period x
             formant): how far after the key an At Key grab has to end. */
@@ -124,10 +141,19 @@ namespace grainlock
         /** The same, for a key that waited: the new grab ends grabDelay samples before now (counted on
             until the voice is free to take it) instead of at the usual Offset. */
         void retargetPlaced (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope,
-                             int grabDelay, bool placed);
+                             int grabDelay, bool placed, int atKeyPart);
 
-        /** Does nothing to a voice that is already released. A voice that is still waiting to grab
-            remembers how long its key was down and plays that long once it has grabbed. */
+        /** Mono: the key that just took this voice over had already come up (a tap made while it
+            waited its turn). The note plays for as long as that key was down, then releases. */
+        void releaseAfter (int samples) noexcept;
+
+        /** Mono: a voice that is still waiting to grab is handed to another key. Its level and its
+            planned grab stay as they are. */
+        void renote (int midiNote) noexcept;
+
+        /** A voice that is still waiting to grab remembers how long its key was down and plays that
+            long once it has grabbed. Releasing a voice that is playing out such a length ends it now
+            ("all notes off"); otherwise a voice that is already released is left alone. */
         void release() noexcept;
         void steal (int fadeSamples) noexcept;
         void kill() noexcept;
@@ -135,8 +161,13 @@ namespace grainlock
         /** This voice's own (polyphonic) aftertouch, 0..1. */
         void setPressure (float zeroToOne) noexcept { polyPressure = juce::jlimit (0.0f, 1.0f, zeroToOne); }
 
-        /** Adds this voice's output for one sample. */
-        void render (const VoiceContext& ctx, const CaptureSource& source, float& outLeft, float& outRight) noexcept;
+        /** Adds this voice's output for one sample, and (while Feedback is up) what it sends back. */
+        void render (const VoiceContext& ctx, const CaptureSource& source, float& outLeft, float& outRight,
+                     FeedbackSend& send) noexcept;
+
+        /** The song has reached a grid line: a Live voice re-grabs the audio of the line (unless Skip,
+            Threshold or Skip Hiss says no), fading over at most fadeCapSamples. */
+        void gridLine (const VoiceContext& ctx, const CaptureSource& source, juce::int64 lineIndex, int fadeCapSamples) noexcept;
 
         /** Fills dest with one loop of the current play state, for the display. Does not advance anything. */
         int renderLoopShape (const VoiceContext& ctx, float* dest, int numPoints) const noexcept;
@@ -167,9 +198,11 @@ namespace grainlock
             float seamRho = 0.0f;
             float gainTarget = 1.0f;      // Auto Gain as measured
             float gain = 1.0f;            // Auto Gain as applied: glides to the target, so an update never clicks
+            float sendGain = 1.0f;        // the same measurement, unsmoothed and always on: what Feedback sends
             double measuredCycle = 0.0;   // the settings the measurement was made for
             float measuredSeam = -1.0f;
             bool measuredAuto = false;
+            bool measuredSend = false;
         };
 
         /** Linear glide in semitones, in double so long glides land exactly on the note. */
@@ -236,6 +269,18 @@ namespace grainlock
         double loopLengthSamples (const PlayState& state, double frequency) const noexcept;
         static float correlationBetween (const PlayState& a, const PlayState& b) noexcept;
 
+        /** Source samples everything the loop reads covers for a grab at period: cycles and seam. */
+        double regionFor (const VoiceContext& ctx, double period) const noexcept;
+        /** Where the next Live re-grab ends: the usual lag, but never behind the grain it replaces. */
+        int nextEndDelay (const CaptureSource& source) const noexcept;
+        /** Threshold and Skip Hiss: may a Live re-grab ending endDelay ago be taken? */
+        bool liveGrabAllowed (const VoiceContext& ctx, int endDelay) const noexcept;
+        /** Skip: the same turn and key always decide the same way. */
+        bool skipsGrab (const VoiceContext& ctx, juce::uint64 turn) const noexcept;
+        float sendScale (const PlayState& state) const noexcept;
+        /** How alike two play states sound, measured over one loop (0..1). */
+        float correlationOf (const PlayState& a, const PlayState& b, const VoiceContext& ctx) const noexcept;
+
         std::array<GrainBuffer, 2> grains;
         std::array<PlayState, 2> states;
         int current = 0;   // states[current] plays; states[1 - current] is the one fading out
@@ -277,8 +322,19 @@ namespace grainlock
         int placedDelay = -1;
         bool placedGrab = false;
 
+        // At Key: the note's first slice ended one loop region later than the Offset says, and every
+        // later grab of the note keeps that distance from the input.
+        int atKeySamples = 0;
+        bool refreshClockStale = false;     // a key took the voice over: the synced Refresh clock restarts
+        int nudgeHistory = 131072;          // the loop-point nudge looks no further back than 0.3 stage 1 could
+
         // Synced Refresh: re-grabs fall due on a clock that starts with the note.
         double noteAge = 0.0, refreshDueAt = 0.0;
+
+        // Skip: a skipped re-grab uses up its turn, and the next one is a Refresh later.
+        double refreshSkippedAt = 0.0;
+        juce::uint64 refreshTurn = 0;
+        int gridFadeCap = 0;                // a grid grab's crossfade is at most this long; 0 = not a grid grab
 
         bool tapeStopEnabled = false;
         bool tapeStopping = false;
