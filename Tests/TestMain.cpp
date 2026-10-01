@@ -1455,7 +1455,7 @@ namespace
                 { ParamID::pitchLfoTrig, 4 }, { ParamID::formantLfoTrig, 4 }, { ParamID::grainLfoTrig, 4 },
                 { ParamID::wheelDest, 5 }, { ParamID::touchDest, 5 }, { ParamID::exprDest, 5 },
                 { ParamID::grabAt, 2 }, { ParamID::waitSync, 10 }, { ParamID::offsetSync, 10 }, { ParamID::refreshSync, 13 },
-                { ParamID::holdMode, 4 }, { ParamID::holdTime, 9 }, { ParamID::spreadMode, 3 },
+                { ParamID::keyUpMode, 4 }, { ParamID::noteLength, 9 }, { ParamID::spreadMode, 3 },
             };
             int wrong = 0, choices = 0;
             for (const auto& [id, count] : lists)
@@ -2718,7 +2718,7 @@ namespace
 
     void testPedalAndHoldModes()
     {
-        section ("0.3 G06: the sustain pedal, Latch, On Grid and Full decide when a note ends");
+        section ("0.3 G06: the sustain pedal, Latch, To Grid and Fixed decide when a note ends");
 
         const auto input = noiseInput (144000, 51, 0.25f);
         auto frozenOnly = [] (Harness& h)
@@ -2761,7 +2761,7 @@ namespace
             // Latch: a chord stays after its keys are up; the next chord replaces it.
             Harness h (48000.0, 256);
             frozenOnly (h);
-            h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+            h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::latch);
             // (C, E and G sharp: no two of them share a harmonic, so each can be told from the others.)
             const auto out = play (h, input, { keyDown (24000, 60), keyDown (24000, 64), keyDown (24000, 68),
                                                keyUp (28800, 60), keyUp (28800, 64), keyUp (28800, 68),
@@ -2778,7 +2778,7 @@ namespace
             // Latch: a note pressed again while another key is down is taken out of the chord.
             Harness h (48000.0, 256);
             frozenOnly (h);
-            h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+            h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::latch);
             const auto out = play (h, input, { keyDown (24000, 60), keyDown (26400, 64), keyUp (28800, 64),
                                                keyDown (31200, 64), keyUp (33600, 64), keyUp (36000, 60) });
             const double e = noteAgainst (out, 60000, 64, 60);
@@ -2792,11 +2792,11 @@ namespace
             {
                 Harness h (48000.0, 256);
                 h.set (ParamID::release, 30.0f);
-                h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+                h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::latch);
                 const auto first = play (h, input, { keyDown (24000, 60), keyUp (28800, 60) }, 0.0, 120.0);
                 const float ringing = largestDifference (first, input, 120000, 140000);
                 if (switchOff)
-                    h.set (ParamID::holdMode, (float) (int) HoldMode::normal);
+                    h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::normal);
                 const auto second = switchOff ? play (h, input, {}, 6.0, 120.0) : play (h, input, {});   // no play head: the song has stopped
                 return std::pair<float, float> (ringing, largestDifference (second, input, 24000, second.size()));
             };
@@ -2813,7 +2813,7 @@ namespace
             {
                 Harness h (48000.0, 256);
                 h.set (ParamID::release, 30.0f);
-                h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+                h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::latch);
                 h.set (ParamID::mono, mono ? 1.0f : 0.0f);
                 const auto first = play (h, input, { keyDown (24000, 60) }, 0.0, 120.0);
                 const auto second = play (h, input, { keyUp (0, 60) });   // no play head: the song has stopped
@@ -2829,9 +2829,9 @@ namespace
                 Harness h (48000.0, 256);
                 frozenOnly (h);
                 h.set (ParamID::mono, 1.0f);
-                h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+                h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::latch);
                 const auto first = play (h, input, { keyDown (24000, 60), keyDown (36000, 64), keyUp (40000, 64) });
-                h.set (ParamID::holdMode, (float) (int) HoldMode::normal);
+                h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::normal);
                 const auto second = play (h, input, {});
                 const double latched = noteAgainst (first, 100000, 64, 60), back = noteAgainst (second, 60000, 60, 64);
                 check (latched > 10.0 && back > 10.0 && largestSample (second, 120000, 140000) > 0.01f,
@@ -2842,7 +2842,7 @@ namespace
             // Held through a stop and a start, the key is latched again: its key-up in the running song is ignored.
             Harness h (48000.0, 256);
             h.set (ParamID::release, 30.0f);
-            h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+            h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::latch);
             play (h, input, { keyDown (24000, 60) }, 0.0, 120.0);
             play (h, input, {});
             const auto third = play (h, input, { keyUp (24000, 60) }, 0.0, 120.0);
@@ -2852,12 +2852,12 @@ namespace
         }
 
         {
-            // Full: every note lasts one Hold Time (1/4 = 24000 samples at 120 BPM), whatever the key does.
+            // Full: every note lasts one Note Length (1/4 = 24000 samples at 120 BPM), whatever the key does.
             auto run = [&] (bool tap)
             {
                 Harness h (48000.0, 256);
                 frozenOnly (h);
-                h.set (ParamID::holdMode, (float) (int) HoldMode::full);
+                h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::fixed);
                 std::vector<ScriptEvent> events { keyDown (24000, 60) };
                 if (tap)
                     events.push_back (keyUp (26400, 60));
@@ -2866,7 +2866,7 @@ namespace
             const auto tapped = run (true), held = run (false);
             check (largestSample (tapped, 42000, 47000) > 0.01f && juce::exactlyEqual (largestSample (tapped, 60000, 70000), 0.0f)
                        && juce::exactlyEqual (largestDifference (tapped, held, 0, tapped.size()), 0.0f),
-                   fmt ("Full, Hold Time 1/4: a 50 ms tap sounds for the whole beat (peak %.2f near its end) and no longer (%g); a key held for seconds plays the same note (max difference %g)",
+                   fmt ("Fixed, Note Length 1/4: a 50 ms tap sounds for the whole beat (peak %.2f near its end) and no longer (%g); a key held for seconds plays the same note (max difference %g)",
                         (double) largestSample (tapped, 42000, 47000), (double) largestSample (tapped, 60000, 70000),
                         (double) largestDifference (tapped, held, 0, tapped.size())));
         }
@@ -2878,16 +2878,16 @@ namespace
             {
                 Harness h (48000.0, 256);
                 frozenOnly (h);
-                h.set (ParamID::holdMode, (float) (int) HoldMode::onGrid);
+                h.set (ParamID::keyUpMode, (float) (int) KeyUpMode::toGrid);
                 return play (h, input, { keyDown (30000, 60), keyUp (up, 60) }, playing ? 0.0 : -1.0, 120.0);
             };
             const auto between = run (40000, true), onLine = run (48000, true), stopped = run (40000, false);
             const double carried = rmsDb (between, 44000, 47500) - rmsDb (between, 34000, 38000);
             check (std::abs (carried) <= 1.0 && juce::exactlyEqual (largestSample (between, 60000, 70000), 0.0f),
-                   fmt ("On Grid, 1/4: a key let go 170 ms before the beat sounds on to the beat (%+.2f dB) and ends there (%g)",
+                   fmt ("To Grid, 1/4: a key let go 170 ms before the beat sounds on to the beat (%+.2f dB) and ends there (%g)",
                         carried, (double) largestSample (between, 60000, 70000)));
             check (juce::exactlyEqual (largestSample (onLine, 60000, 70000), 0.0f) && juce::exactlyEqual (largestSample (stopped, 52000, 60000), 0.0f),
-                   fmt ("On Grid: a key let go on the beat ends there, not a beat later (%g); with the song stopped it ends at the key (%g)",
+                   fmt ("To Grid: a key let go on the beat ends there, not a beat later (%g); with the song stopped it ends at the key (%g)",
                         (double) largestSample (onLine, 60000, 70000), (double) largestSample (stopped, 52000, 60000)));
         }
 
@@ -3719,11 +3719,12 @@ namespace
         section ("Presets: each one sets exactly its values (defaults elsewhere) and plays safely");
 
         const auto& presets = factoryPresets();
-        const char* expected[] = { "Init", "Robot Voice", "Stutter Gate", "Drone Pad", "Glitch Drums", "Formant Choir" };
+        const char* expected[] = { "Init", "Robot Voice", "Stutter Gate", "Drone Pad", "Glitch Drums", "Formant Choir",
+                                   "Beat Catcher", "Grid Slicer", "Feedback Bloom", "Tape Choir", "Latch Drone", "Breath Guard" };
         bool namesMatch = presets.size() == std::size (expected);
         for (size_t i = 0; namesMatch && i < presets.size(); ++i)
             namesMatch = juce::String (presets[i].name) == expected[i];
-        check (namesMatch, fmt ("%d factory presets, in menu order: Init, Robot Voice, Stutter Gate, Drone Pad, Glitch Drums, Formant Choir",
+        check (namesMatch, fmt ("%d factory presets, in menu order: the five from 0.2 after Init, then Beat Catcher, Grid Slicer, Feedback Bloom, Tape Choir, Latch Drone, Breath Guard",
                                 (int) presets.size()));
 
         for (int index = 0; index < (int) presets.size(); ++index)
@@ -3798,7 +3799,8 @@ namespace
 
     /** Plays a chord into a preset and renders the real interface (2x) to a PNG, exactly as the
         editor draws it, including the loop display fed through the audio thread's FIFO. */
-    bool renderSnapshot (const juce::File& file, const char* presetName, std::initializer_list<int> chord, int lfoTab)
+    bool renderSnapshot (const juce::File& file, const char* presetName, std::initializer_list<int> chord, int lfoTab,
+                         int page, bool waiting = false)
     {
         const double rate = 48000.0;
         const int block = 1600;   // one display frame per block
@@ -3809,6 +3811,9 @@ namespace
         if (const int index = proc.getPresetIndex (presetName); index >= 0)
             proc.loadPreset (index);
         proc.apvts.state.setProperty ("lfoTab", lfoTab, nullptr);
+        proc.apvts.state.setProperty ("page", page, nullptr);
+        if (waiting)
+            fingerprint::set (proc, "wait", 2000.0f);   // the key is still waiting when the picture is taken
 
         ui::GrainLookAndFeel lookAndFeel;
         ui::MainPanel panel (proc);
@@ -3870,8 +3875,17 @@ namespace
         const auto dir = juce::File::getCurrentWorkingDirectory().getChildFile (directory);
         dir.createDirectory();
 
-        bool ok = renderSnapshot (dir.getChildFile ("grainlock-formant-choir.png"), "Formant Choir", { 57, 60, 64, 67 }, (int) LfoTarget::formant);
-        ok = renderSnapshot (dir.getChildFile ("grainlock-glitch-drums.png"), "Glitch Drums", { 48, 55 }, (int) LfoTarget::grainCycles) && ok;
+        bool ok = true;
+        static const char* pageNames[] = { "1-freeze", "2-play", "3-motion", "4-keys", "5-tone" };
+        for (int page = 0; page < ui::MainPanel::numPages; ++page)
+            ok = renderSnapshot (dir.getChildFile (juce::String ("grainlock-page-") + pageNames[page] + ".png"),
+                                 "Init", { 57, 60, 64 }, 0, page) && ok;
+
+        ok = renderSnapshot (dir.getChildFile ("grainlock-formant-choir.png"), "Formant Choir", { 57, 60, 64, 67 },
+                             (int) LfoTarget::formant, ui::MainPanel::motionPage) && ok;
+        ok = renderSnapshot (dir.getChildFile ("grainlock-glitch-drums.png"), "Glitch Drums", { 48, 55 },
+                             (int) LfoTarget::grainCycles, ui::MainPanel::motionPage) && ok;
+        ok = renderSnapshot (dir.getChildFile ("grainlock-waiting.png"), "Init", { 60 }, 0, 0, true) && ok;
         return ok ? 0 : 1;
     }
 }

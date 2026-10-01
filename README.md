@@ -40,77 +40,115 @@ becomes a drone you can play like a synth.
 
 Tips:
 
-- With **Dry When Idle** on (the default), the original sound passes through untouched until you hold
+- With **Dry Idle** on (the default), the original sound passes through untouched until you hold
   a key, then Mix decides how much of the frozen tone you hear.
 - Note names in GrainLock follow Cubase: middle C is **C3**.
-- Hold a chord for up to 8 notes at once. A 9th note takes over the oldest one.
+- Hold a chord of up to 8 notes (fewer if you turn **Voices** down). One note too many takes over
+  a note that is already fading out if there is one, otherwise the oldest.
 
 ## 4. What each control does
 
-**Top bar**
+The window has a top bar, the display with the **OUTPUT** controls beside it, and five pages of
+controls: **FREEZE**, **PLAY**, **MOTION**, **KEYS** and **TONE**. Click a page name to open it.
+A control that is faded does nothing with the other settings as they are (for example Refresh in
+HOLD); it still works, and turns solid again when it matters.
+
+**Knobs**: hover to see the value, drag up or down to change it, hold **Ctrl** while dragging for
+fine steps, and double-click to reset.
+
+### Top bar and OUTPUT (always in view)
 
 | Control | What it does |
 | --- | --- |
 | Preset menu, ◀ ▶ | Loads a factory sound. ◀ ▶ step through them. |
 | Capture: HOLD / LIVE | HOLD grabs the sound once when you press a key and freezes it. LIVE keeps re-grabbing, so the tone follows the source. |
+| Mix | Balance between the original sound and the frozen tone while keys are held. |
+| Gain | Overall output level. A built-in limiter keeps big chords from clipping. |
+| Dry Idle | On: the original sound plays at full level whenever no note is held. |
+| Auto Gain | On: a note stays about as loud whatever Grain is set to. (Without it, a source already at the note's pitch gets much louder as Grain goes up.) |
 
-**FREEZE**
+### FREEZE page: what a note grabs, and when
 
 | Control | What it does |
 | --- | --- |
 | Grain | How many wavelengths of the note each loop holds. More cycles give a smoother, purer tone. |
-| Smooth | How long the crossfade is where the loop wraps around. More means softer; zero means buzzy and clicky. |
-| Offset | Grabs sound from this far back in time, so a key pressed late can still catch a hit that just happened. |
-| Refresh | LIVE only: how often the loop grabs fresh sound. Short keeps words understandable; long gives slow, evolving drones. |
+| Smooth | How long the crossfade is where the loop wraps around. More means softer; zero means buzzy. |
 | Lock (Pitch Lock) | On: the note's pitch is always exact. Off: the loop really is Grain wavelengths long, which is grittier and can sound lower than the note. |
+| Offset | Grabs sound from this far back in time, so a key pressed late can still catch a hit that just happened. **Offset Sync** sets it as a note value at Cubase's tempo instead. |
+| Refresh | LIVE only: how often the loop grabs fresh sound. **Refresh Sync** makes it a note value. |
+| On Grid | LIVE with Refresh Sync: re-grabs land on the song's own beat lines instead of counting from when you pressed the key. |
+| Skip | LIVE: the chance that a re-grab is left out, so the note keeps what it had a little longer. |
+| Feedback | Puts the frozen sound back into what gets grabbed next, so a LIVE note keeps ringing and changing after the source has moved on. It always dies away by itself. Leave Auto Gain on with it. |
+| Grab | **Before Key** grabs the sound just before you pressed. **At Key** waits and grabs the sound that starts when you press. |
+| Wait | Waits this long after the key before grabbing. (A short tap still plays for as long as you held it, just later.) **Wait Sync** makes it a note value. |
+| Snap | Looks for the nearest hit (a drum, a consonant) within this many ms of the key and starts the loop exactly on it. With no hit nearby, the note simply starts that much later. |
+| Threshold | A key pressed while the input is quieter than this waits for sound instead of freezing silence. In LIVE, the note keeps its last good grab while the input is quiet. |
+| Max Wait | The longest a key waits for sound before it grabs whatever is there. |
+| Skip Hiss | LIVE: never re-grabs breath or "sss" sounds. |
+| Gate | The frozen sound is heard only while the input is above the Threshold. |
 
-**VOICE**
+### PLAY page: the note itself
 
 | Control | What it does |
 | --- | --- |
-| Tune | Shifts every note up or down in semitones. |
-| Fine | Fine-tunes every note in cents. |
+| Tune / Fine | Shifts every note in semitones / cents. |
 | Formant | Changes the character (bigger or smaller, darker or brighter) without changing the pitch. |
-| Glide | Mono only: how long the pitch slides from one note to the next. |
+| Key Follow | On: the character follows the key, so high notes are brighter and low notes darker, like a sampler. Off: every key has the same character. |
+| Glide | How long the pitch slides from one note to the next (in Mono, or with Poly on). |
+| Legato | Glide only when you play the new key before letting go of the old one. |
+| Per Oct | Glide is the time for one octave, so big jumps take longer. |
+| Poly | Glide in chords too: each new note slides in from the last key you played. |
 | Mono | One note at a time; the last key you pressed wins, and releasing it returns to a key still held. |
+| Voices | How many notes can sound at once (1 to 8). |
+| A / D / S / R | The volume envelope: fade-in, fall to the sustain level, sustain level, fade-out. |
+| Vel | How much playing harder makes a note louder. |
 
-**OUTPUT**
+### MOTION page: what moves by itself
 
-| Control | What it does |
-| --- | --- |
-| Mix | Balance between the original sound and the frozen tone while keys are held. |
-| Gain | Overall output level. A built-in limiter keeps big chords from clipping. |
-| Dry Idle (Dry When Idle) | On: the original sound plays at full level whenever no key is held. |
-
-**ENVELOPE**
+Three LFOs (wobbles), one each for **PITCH**, **FORMANT** and **GRAIN**; click a tab to see that
+one. Its light glows while it is on, and a white dot rides the Fine, Formant and Grain knobs.
 
 | Control | What it does |
 | --- | --- |
-| A | Attack: how fast each note fades in. Zero gives hard stutters. |
-| D | Decay: how fast it falls to the sustain level. |
-| S | Sustain: the level while the key stays down. |
-| R | Release: how long the note rings after you let go. |
-| Vel | How much playing harder makes a note louder. At zero, every note is full volume. |
+| On / Rate / Depth | Switches the LFO on, sets its speed (when Sync is Free) and its strength. |
+| Sync | Free, or a note value at Cubase's tempo. |
+| Shape | Sine, triangle, square, S&H (a random step each cycle), saw, or random (a smooth wander). |
+| Starts | **Free**: runs with the song. **Note**: starts again at every key. **Voice**: every note has its own. **Once**: one cycle per note, then it stops. |
+| Fade In | The LFO comes in gradually after the note starts (delayed vibrato). |
+| Phase | Where in its cycle the LFO starts. |
+| Invert | Turns the shape upside down. |
+| Note Envelope A / D | A second envelope per note: it rises over A and falls back over D. |
+| Pitch / Formant / Grain | How far that envelope bends each of them (for example a pitch swoop into every note). |
+| Tape Stop | When you let go, the note slows down to a stop over the Release time. |
+| Vibrato Rate / Depth | The vibrato that the mod wheel, aftertouch or pedal brings in (see KEYS). |
 
-**LFO**: three separate wobbles, one each for PITCH, FORMANT and GRAIN. Any or all of them can run
-at the same time, each with its own speed, sync, shape and depth. Click a tab to see that LFO's
-controls; its light glows while it is on. A white dot rides on the Fine, Formant and Grain knobs to
-show each LFO moving.
+### KEYS page: the rest of the keyboard
 
 | Control | What it does |
 | --- | --- |
-| On | Switches this LFO on or off. |
-| Rate | Wobble speed in Hz (used when Sync is Free). |
-| Depth | How strong the wobble is. At 100%: PITCH swings ±100 cents, FORMANT ±12 semitones, GRAIN ±8 cycles. |
-| Sync | Free, or locked to Cubase's tempo, from 1/1 down to 1/32 (T = triplet). |
-| Shape | Sine, triangle, square, or S&H (a new random step every cycle). |
+| Bend Up / Down | How far the pitch wheel bends, in semitones. |
+| Mod Wheel, Aftertouch, Expression | What each one moves (vibrato, Formant, Grain or level) and by how much. |
+| Key Up: Mode | **Normal**: a note ends when you let go. **Latch**: a chord stays until you play the next one (to stop it, switch back to Normal or stop the song). **To Grid**: letting go takes effect on the next Length line of the song. **Fixed**: every note lasts exactly one Length. |
+| Length | The note value used by To Grid and Fixed. |
+| Sus Pedal | On: the sustain pedal holds notes (in Normal and To Grid). |
+
+### TONE page: the frozen sound only (the original sound is never touched)
+
+| Control | What it does |
+| --- | --- |
+| Low Cut / High Cut | Remove lows / highs. Fully left / right is off. |
+| Tilt | Tips the balance towards bass or treble. |
+| Drive | Warm overdrive. It is cleaned up internally so it does not add harsh whistles. |
+| Hollow | Thins the sound towards a hollow, clarinet-like tone. |
+| Diffuse | Smears the sound into a soft, wide cloud. |
+| Spread / Spread Mode | Places notes left and right: alternately, by pitch, or anywhere. |
+| Width | Opens a single note out in stereo. In mono it sounds exactly as it did. |
+| Drift | Each note wanders slightly in pitch and position. |
 
 **Display and keyboard**: the big display shows one loop of the most recent note, with the
-crossfade (seam) shaded on the right and the notes you are holding as chips. The strip at the
-bottom lights up the keys you are holding.
-
-**Knobs**: hover to see the value, drag up or down to change it, hold **Ctrl** while dragging for
-fine steps, and double-click to reset.
+crossfade (seam) shaded on the right and the notes you are holding as chips. While a key is
+waiting to grab (Wait, At Key, Snap, Threshold) the display says so. The strip at the bottom lights
+up the keys you are holding; keys that are still waiting are dimmer.
 
 ## 5. Factory presets
 
@@ -121,8 +159,21 @@ fine steps, and double-click to reset.
 | Drone Pad | Live mode, 8 cycles, slow fade in and out, a gentle pitch drift plus a slower formant swell. |
 | Glitch Drums | Hold mode, grabs from well before the key, random steps on Grain (1/16) and pitch (1/8). Made for drum loops. |
 | Formant Choir | Live mode, 4 cycles, formant lowered by 5 semitones, vibrato plus a slow vowel drift. Play 4-note chords. |
+| Beat Catcher | For drum loops: At Key with Snap, so each note starts its loop on the nearest hit. |
+| Grid Slicer | Re-grabs on every eighth note of the song, skips a quarter of them, and ends each note on the next sixteenth. |
+| Feedback Bloom | Feedback and Diffuse: a chord keeps blooming after the source has moved on. |
+| Tape Choir | A choir whose tone follows the key, with a late vibrato on every voice and a tape-stop release. |
+| Latch Drone | Play a chord and let go: it stays, wide and slowly wandering, until the next chord. |
+| Breath Guard | For a voice: waits for sound instead of freezing silence, and never grabs breaths or "sss". |
 
-## 6. Something wrong? Tell me
+## 6. Opening a project made with an older version
+
+A project saved with version 0.2 sounds the way it did. Three of the new things are switched off
+for it, because 0.2 did not have them: **Auto Gain**, the **sustain pedal**, and the **mod wheel**
+(which now adds vibrato by default). Switch them on if you want them. The loop seam is a little
+cleaner than in 0.2; that is the one deliberate difference.
+
+## 7. Something wrong? Tell me
 
 Open an issue at <https://github.com/kalanhattonre-bit/GrainLock/issues/new> and include:
 
@@ -151,7 +202,8 @@ cmake --build build --config Release
 build/GrainLockTests_artefacts/Release/GrainLockTests
 ```
 
-The test runner checks pitch accuracy, staccato safety, dry pass-through, state round-trips and
-allocation-free processing. CI (`.github/workflows/build.yml`) builds on Windows and Linux, runs the
-tests, validates the VST3 with pluginval at strictness 10, and attaches a zip to a GitHub release
-for every `v*` tag.
+The test runner checks pitch accuracy, staccato safety, dry pass-through, state round-trips,
+allocation-free processing, every 0.3 feature, and two reference sounds (the 0.2 sound and the 0.3
+default sound) that must not drift. CI (`.github/workflows/build.yml`) builds on Windows and Linux,
+runs the tests, validates the VST3 with pluginval at strictness 10, renders pictures of every page
+of the interface, and attaches a zip to a GitHub release for every `v*` tag.

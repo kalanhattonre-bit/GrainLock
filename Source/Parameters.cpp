@@ -123,13 +123,13 @@ namespace grainlock
         return beats[juce::jlimit (0, count - 1, syncIndex)];
     }
 
-    const juce::StringArray& holdTimeChoices()
+    const juce::StringArray& noteLengthChoices()
     {
         static const juce::StringArray choices { "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2", "1/1" };
         return choices;
     }
 
-    double holdTimeBeats (int index) noexcept
+    double noteLengthBeats (int index) noexcept
     {
         return grabSyncBeats (juce::jlimit (0, 8, index) + 1);
     }
@@ -199,7 +199,7 @@ namespace grainlock
 
         // 0.3. Every default leaves a 0.2 project sounding the same, except Auto Gain, which is on
         // for new work and switched off when an older project is loaded (migratePre03State).
-        layout.add (boolParam (ParamID::formantTrack, "Formant Track", false));
+        layout.add (boolParam (ParamID::formantTrack, "Formant Key Follow", false));
         layout.add (boolParam (ParamID::autoGain, "Auto Gain", true));
 
         // How each LFO starts. Free with no fade, no offset and not inverted is 0.2's LFO.
@@ -231,7 +231,7 @@ namespace grainlock
                                 [] (float v, int) { return juce::String (juce::roundToInt (v)) + " ct"; }));
 
         const juce::StringArray destinations { "Off", "Vibrato", "Formant", "Grain", "Level" };
-        const char* sourceNames[] = { "Wheel", "Aftertouch", "Pedal" };
+        const char* sourceNames[] = { "Wheel", "Aftertouch", "Expression" };
         const int sourceDefaults[] = { (int) ModDest::vibrato, (int) ModDest::off, (int) ModDest::off };
         for (int i = 0; i < numModSources; ++i)
         {
@@ -243,30 +243,30 @@ namespace grainlock
 
         // WHEN A NOTE GRABS. Before Key with no Wait is 0.2: the slice ends Offset before the key.
         layout.add (choiceParam (ParamID::grabAt, "Grab At", { "Before Key", "At Key" }, 0));
-        layout.add (floatParam (ParamID::wait, "Wait", skewedRange (0.0f, 2000.0f, 0.1f, 250.0f), 0.0f, formatMs, parseMs));
-        layout.add (choiceParam (ParamID::waitSync, "Wait Sync", grabSyncChoices(), 0));
+        layout.add (floatParam (ParamID::wait, "Grab Wait", skewedRange (0.0f, 2000.0f, 0.1f, 250.0f), 0.0f, formatMs, parseMs));
+        layout.add (choiceParam (ParamID::waitSync, "Grab Wait Sync", grabSyncChoices(), 0));
         layout.add (choiceParam (ParamID::offsetSync, "Offset Sync", grabSyncChoices(), 0));
         layout.add (choiceParam (ParamID::refreshSync, "Refresh Sync", lfoSyncChoices(), 0));
 
         // WHAT A NOTE GRABS. Everything here is off by default.
-        layout.add (floatParam (ParamID::snap, "Snap", Range (0.0f, 100.0f, 0.1f), 0.0f,
+        layout.add (floatParam (ParamID::snap, "Grab Snap", Range (0.0f, 100.0f, 0.1f), 0.0f,
                                 [] (float v, int) { return v <= 0.0f ? juce::String ("Off") : formatMs (v, 0); },
                                 [] (const juce::String& text) { return text.trim().equalsIgnoreCase ("off") ? 0.0f : parseMs (text); }));
-        layout.add (floatParam (ParamID::threshold, "Threshold", Range (thresholdOffDb, -10.0f, 0.1f), thresholdOffDb,
+        layout.add (floatParam (ParamID::threshold, "Input Threshold", Range (thresholdOffDb, -10.0f, 0.1f), thresholdOffDb,
                                 [] (float v, int) { return v <= thresholdOffDb ? juce::String ("Off") : juce::String (v, 1) + " dB"; },
                                 [] (const juce::String& text) { return text.trim().equalsIgnoreCase ("off") ? thresholdOffDb : text.trim().getFloatValue(); }));
-        layout.add (floatParam (ParamID::maxWait, "Max Wait", skewedRange (0.0f, 2000.0f, 0.1f, 500.0f), 500.0f, formatMs, parseMs));
-        layout.add (boolParam (ParamID::skipHiss, "Skip Hiss", false));
-        layout.add (boolParam (ParamID::gate, "Gate", false));
+        layout.add (floatParam (ParamID::maxWait, "Input Max Wait", skewedRange (0.0f, 2000.0f, 0.1f, 500.0f), 500.0f, formatMs, parseMs));
+        layout.add (boolParam (ParamID::skipHiss, "Input Skip Hiss", false));
+        layout.add (boolParam (ParamID::gate, "Input Gate", false));
         layout.add (boolParam (ParamID::gridGrabs, "Grid Grabs", false));
-        layout.add (floatParam (ParamID::skipChance, "Skip", Range (0.0f, 100.0f, 1.0f), 0.0f, formatPercent));
+        layout.add (floatParam (ParamID::skipChance, "Grab Skip Chance", Range (0.0f, 100.0f, 1.0f), 0.0f, formatPercent));
         layout.add (floatParam (ParamID::feedback, "Feedback", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
 
         // HOW NOTES ARE HELD, AND HOW MANY PLAY. The sustain pedal is on for new work and switched off
         // when an older project is loaded (0.2 ignored it).
         layout.add (boolParam (ParamID::sustainPedal, "Sustain Pedal", true));
-        layout.add (choiceParam (ParamID::holdMode, "Hold Mode", { "Normal", "Latch", "On Grid", "Full" }, (int) HoldMode::normal));
-        layout.add (choiceParam (ParamID::holdTime, "Hold Time", holdTimeChoices(), 6));
+        layout.add (choiceParam (ParamID::keyUpMode, "Key Up Mode", { "Normal", "Latch", "To Grid", "Fixed" }, (int) KeyUpMode::normal));
+        layout.add (choiceParam (ParamID::noteLength, "Note Length", noteLengthChoices(), 6));
         layout.add (boolParam (ParamID::glideLegato, "Glide Legato", false));
         layout.add (boolParam (ParamID::glideRate, "Glide Per Octave", false));
         layout.add (boolParam (ParamID::polyGlide, "Poly Glide", false));
@@ -355,8 +355,8 @@ namespace grainlock
         feedback    = get (ParamID::feedback);
 
         sustainPedal = get (ParamID::sustainPedal);
-        holdMode     = get (ParamID::holdMode);
-        holdTime     = get (ParamID::holdTime);
+        keyUpMode     = get (ParamID::keyUpMode);
+        noteLength     = get (ParamID::noteLength);
         glideLegato  = get (ParamID::glideLegato);
         glideRate    = get (ParamID::glideRate);
         polyGlide    = get (ParamID::polyGlide);

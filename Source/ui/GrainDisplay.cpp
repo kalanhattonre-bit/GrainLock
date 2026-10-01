@@ -5,10 +5,11 @@
 
 namespace grainlock::ui
 {
-    void GrainDisplay::update (const ScopeFrame* frame, const juce::String& statusText)
+    void GrainDisplay::update (const ScopeFrame* frame, const juce::String& statusText, const juce::String& waitingText)
     {
-        bool changed = statusText != status;
+        bool changed = statusText != status || waitingText != waitText;
         status = statusText;
+        waitText = waitingText;
 
         if (frame != nullptr)
         {
@@ -27,6 +28,7 @@ namespace grainlock::ui
                 latest.lfoActive = frame->lfoActive;
                 latest.live = frame->live;
                 latest.heldNotes = frame->heldNotes;
+                latest.waitingNotes = frame->waitingNotes;
                 latest.hasWave = false;
             }
             changed = true;
@@ -47,7 +49,10 @@ namespace grainlock::ui
         const float targetAlpha = latest.hasWave ? 1.0f : 0.0f;
         if (std::abs (targetAlpha - waveAlpha) > 0.001f)
         {
-            waveAlpha += (targetAlpha - waveAlpha) * (latest.hasWave ? 0.5f : 0.12f);
+            // The last loop fades out slowly, unless a key is waiting to grab: then it clears fast,
+            // so the display can say so.
+            const bool waitingNow = ! latest.hasWave && (latest.waitingNotes[0] | latest.waitingNotes[1]) != 0;
+            waveAlpha += (targetAlpha - waveAlpha) * (latest.hasWave || waitingNow ? 0.5f : 0.12f);
             changed = true;
         }
         else if (! juce::exactlyEqual (waveAlpha, targetAlpha))
@@ -106,9 +111,12 @@ namespace grainlock::ui
         }
         else
         {
-            g.setColour (Theme::textFaint);
-            g.setFont (Theme::font (13.0f));
-            g.drawText ("Hold a MIDI note to freeze whatever is playing", inner, juce::Justification::centred, true);
+            // A key that is down but has not grabbed yet says why, instead of the hint.
+            const bool waiting = (latest.waitingNotes[0] | latest.waitingNotes[1]) != 0;
+            g.setColour (waiting ? Theme::accentAlpha (0.85f) : Theme::textFaint);
+            g.setFont (waiting ? Theme::font (13.0f, true, 0.15f) : Theme::font (13.0f));
+            g.drawText (waiting ? waitText : juce::String ("Hold a MIDI note to freeze whatever is playing"),
+                        inner, juce::Justification::centred, true);
         }
     }
 
@@ -177,6 +185,9 @@ namespace grainlock::ui
         const auto font = Theme::font (12.0f, true, 0.04f);
         g.setFont (font);
 
+        // The chips stop short of the status text, however narrow the display is.
+        const float limit = header.getX() + juce::GlyphArrangement::getStringWidth (Theme::font (12.0f, false, 0.08f), status) + 12.0f;
+
         float right = header.getRight();
         for (int i = latest.numNotes - 1; i >= 0; --i)
         {
@@ -186,7 +197,7 @@ namespace grainlock::ui
             const auto chip = juce::Rectangle<float> (right - w, header.getY() + 2.0f, w, header.getHeight() - 4.0f);
             right -= w + 5.0f;
 
-            if (chip.getX() < header.getCentreX())
+            if (chip.getX() < limit)
                 break;
 
             const bool focus = note == latest.focusNote;
@@ -207,11 +218,12 @@ namespace grainlock::ui
     }
 
     //==============================================================================
-    void KeyStrip::setHeldNotes (const std::array<juce::uint64, 2>& held)
+    void KeyStrip::setNotes (const std::array<juce::uint64, 2>& held, const std::array<juce::uint64, 2>& waiting)
     {
-        if (held != heldNotes)
+        if (held != heldNotes || waiting != waitingNotes)
         {
             heldNotes = held;
+            waitingNotes = waiting;
             repaint();
         }
     }
@@ -226,6 +238,11 @@ namespace grainlock::ui
         {
             return ((heldNotes[(size_t) (note >> 6)] >> (note & 63)) & 1u) != 0;
         };
+        auto isWaiting = [this] (int note)
+        {
+            return ((waitingNotes[(size_t) (note >> 6)] >> (note & 63)) & 1u) != 0;
+        };
+        const auto waitingColour = Theme::accent.withMultipliedSaturation (0.8f).withMultipliedBrightness (0.5f);
         auto isBlack = [] (int note)
         {
             const int k = note % 12;
@@ -252,7 +269,8 @@ namespace grainlock::ui
 
             const auto key = juce::Rectangle<float> (keys.getX() + whiteWidth * (float) whiteIndex, keys.getY(),
                                                      whiteWidth, keys.getHeight()).reduced (0.5f, 0.0f);
-            g.setColour (isHeld (note) ? Theme::accent : Theme::panelRaised);
+            // A waiting key counts as held too, so waiting is asked first.
+            g.setColour (isWaiting (note) ? waitingColour : (isHeld (note) ? Theme::accent : Theme::panelRaised));
             g.fillRect (key);
             ++whiteIndex;
         }
@@ -271,7 +289,7 @@ namespace grainlock::ui
                 {
                     const auto label = juce::Rectangle<float> (keys.getX() + whiteWidth * (float) whiteIndex + 2.0f,
                                                                keys.getBottom() - 9.0f, whiteWidth * 3.0f, 9.0f);
-                    g.setColour (isHeld (note) ? Theme::onAccent : Theme::textFaint);
+                    g.setColour (isWaiting (note) ? Theme::text : (isHeld (note) ? Theme::onAccent : Theme::textFaint));
                     g.drawText (formatNoteName (note), label, juce::Justification::centredLeft, false);
                 }
                 ++whiteIndex;
@@ -289,7 +307,7 @@ namespace grainlock::ui
 
             const float x = keys.getX() + whiteWidth * (float) whiteIndex - whiteWidth * 0.32f;
             const auto key = juce::Rectangle<float> (x, keys.getY(), whiteWidth * 0.64f, keys.getHeight() * 0.58f);
-            g.setColour (isHeld (note) ? Theme::accent : Theme::background);
+            g.setColour (isWaiting (note) ? waitingColour : (isHeld (note) ? Theme::accent : Theme::background));
             g.fillRect (key);
         }
     }

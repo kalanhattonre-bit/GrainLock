@@ -91,7 +91,49 @@ namespace grainlock::ui
         juce::ParameterAttachment attachment;
     };
 
-    /** Draws one cycle of an LFO shape (sine, triangle, square, S&H) inside area. */
+    /** A choice parameter as a drop-down with its name underneath. It takes two cells of a row. */
+    class ChoiceBox final : public juce::Component
+    {
+    public:
+        ChoiceBox (juce::AudioProcessorValueTreeState& state, const juce::String& parameterId, const juce::String& caption);
+
+        void paint (juce::Graphics&) override;
+        void resized() override;
+
+    private:
+        juce::String name;
+        juce::ComboBox box;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> attachment;
+    };
+
+    /** A row of tabs; clicking one selects it. With lights, each tab shows whether its thing is on. */
+    class TabStrip final : public juce::Component
+    {
+    public:
+        TabStrip (const juce::StringArray& tabNames, bool withLights);
+
+        std::function<void (int)> onSelect;
+
+        void setSelected (int index);
+        void setActive (int index, bool isOn);
+        int getSelected() const noexcept { return selected; }
+
+        void paint (juce::Graphics&) override;
+        void mouseDown (const juce::MouseEvent&) override;
+        void mouseMove (const juce::MouseEvent&) override;
+        void mouseExit (const juce::MouseEvent&) override;
+
+    private:
+        int tabAt (juce::Point<float> position) const;
+
+        juce::StringArray names;
+        bool lights;
+        int selected = 0;
+        int hovered = -1;
+        std::vector<bool> active;
+    };
+
+    /** Draws one cycle of an LFO shape (sine, triangle, square, S&H, saw, random) inside area. */
     void paintLfoShapeIcon (juce::Graphics&, int shapeIndex, juce::Rectangle<float> area, juce::Colour colour);
 
     /** The top-bar preset picker. It shows the current preset's name, and any pick from its menu

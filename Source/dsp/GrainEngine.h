@@ -80,8 +80,8 @@ namespace grainlock
 
         // How notes are held, and how many play
         bool sustainPedal = true;             // CC64 holds notes (Normal and On Grid)
-        HoldMode holdMode = HoldMode::normal;
-        int holdTime = 6;                     // index into holdTimeChoices(): the grid of On Grid, the length of Full
+        KeyUpMode keyUpMode = KeyUpMode::normal;
+        int noteLength = 6;                     // index into noteLengthChoices(): the grid of On Grid, the length of Full
         bool glideLegato = false;             // glide only when the new key overlaps another
         bool glidePerOctave = false;          // Glide is the time for one octave
         bool polyGlide = false;               // a new poly note glides in from the last key played
@@ -170,11 +170,11 @@ namespace grainlock
         bool stackHolds (int note) const noexcept;
 
         /** The sustain pedal counts in Normal and On Grid. */
-        bool pedalHolds() const noexcept { return pedalDown && (block.holdMode == HoldMode::normal || block.holdMode == HoldMode::onGrid); }
+        bool pedalHolds() const noexcept { return pedalDown && (block.keyUpMode == KeyUpMode::normal || block.keyUpMode == KeyUpMode::toGrid); }
         /** Releases every held note whose key is up (pedal up, Latch switched off, the song stopping). */
         void releaseKeysUp (double deferBeats) noexcept;
         void releaseVoice (GrainVoice& voice, double deferBeats) noexcept;
-        /** On Grid: beats from the sample being worked on to the next Hold Time line; negative when the
+        /** On Grid: beats from the sample being worked on to the next Note Length line; negative when the
             release should happen now (stopped, or the key came up on a line). */
         double beatsToNextLine() const noexcept;
         /** Full: starts a note's length. */

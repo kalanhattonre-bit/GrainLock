@@ -44,7 +44,7 @@ namespace grainlock::ui
 
         // Base editor size; the window scales this whole layout from 75% to 200%.
         static constexpr int baseWidth = 780;
-        static constexpr int baseHeight = 440;
+        static constexpr int baseHeight = 470;
         static constexpr float corner = 6.0f;
     };
 }

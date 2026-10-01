@@ -5,7 +5,8 @@
 
 namespace grainlock::ui
 {
-    /** The controls of one LFO: on/off, rate, depth, sync and shape. */
+    /** The controls of one LFO, on the same thirteen cells as every other row: on/off, rate, depth,
+        sync, shape, where its cycle starts (trigger), fade-in, phase and invert. */
     class LfoPage final : public juce::Component
     {
     public:
@@ -14,41 +15,22 @@ namespace grainlock::ui
         void paint (juce::Graphics&) override;
         void resized() override;
 
-        /** Called from the UI tick: dims Rate while Sync picks a note division. */
+        /** Called from the UI tick: fades back the controls that do nothing as things are set. */
         void refresh();
 
     private:
+        juce::Rectangle<int> cell (int firstCell, int span) const;
+
         juce::AudioProcessorValueTreeState& state;
         ParamID::LfoIds ids;
 
         PillToggle power;
         Knob rate, depth;
-        juce::ComboBox sync;
-        std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> syncAttachment;
+        ChoiceBox sync;
         SegmentedControl shape;
-        juce::Rectangle<int> syncCaption, shapeCaption;
-    };
-
-    /** PITCH / FORMANT / GRAIN tabs. Each shows a light while its LFO is on; clicking picks which
-        LFO's controls are shown. All three LFOs run at the same time whichever tab is open. */
-    class LfoTabs final : public juce::Component
-    {
-    public:
-        std::function<void (int)> onSelect;
-
-        void setSelected (int index);
-        void setActive (int index, bool isOn);
-
-        void paint (juce::Graphics&) override;
-        void mouseDown (const juce::MouseEvent&) override;
-        void mouseMove (const juce::MouseEvent&) override;
-        void mouseExit (const juce::MouseEvent&) override;
-
-    private:
-        int tabAt (juce::Point<float> position) const;
-
-        int selected = 0;
-        int hovered = -1;
-        std::array<bool, numLfos> active {};
+        ChoiceBox trigger;
+        Knob fade, phase;
+        PillToggle invert;
+        juce::Rectangle<int> shapeCaption;
     };
 }
