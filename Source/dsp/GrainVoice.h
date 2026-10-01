@@ -80,6 +80,8 @@ namespace grainlock
         bool stickyLive = false;        // a Live grain may outlive a refresh, so it is kept and extended like a Hold one
         bool feedbackOn = false;        // voices also hand over what goes back into the input memory
         float feedbackLag = 0.0f;       // how many samples late the feedback path's low pass hands audio back
+
+        double beatsPerSample = 0.0;    // the song's tempo, for a note that ends after a number of beats
     };
 
     /** What the voices send back into the input memory (Feedback), summed over one sample. */
@@ -137,12 +139,26 @@ namespace grainlock
 
         /** Mono mode: move to a new note (gliding over glideSamples) and grab fresh audio for it.
             A negative velocityLevel keeps the current level. */
-        void retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope);
+        void retarget (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope, bool perOctave = false);
+
+        /** A new note that glides in from another pitch (Poly Glide). Call it on an armed voice. With
+            perOctave, glideSamples is the time for one octave. */
+        void glideFrom (double fromNote, int glideSamples, bool perOctave) noexcept;
+
+        /** The note releases itself when this many quarter-note beats have gone by (an On Grid key-up,
+            Full's length). It counts only while the voice is held and sounding; a release, a steal, a
+            kill or a new key ends the count. */
+        void releaseInBeats (double beats) noexcept;
+        void cancelHoldTimer() noexcept { holdBeats = -1.0; }
+        bool hasHoldTimer() const noexcept { return holdBeats >= 0.0; }
+
+        /** How much of a steal's fade is left (0 when the voice is not being stolen). */
+        int stealSamplesLeft() const noexcept { return stealing ? stealRemaining : 0; }
 
         /** The same, for a key that waited: the new grab ends grabDelay samples before now (counted on
             until the voice is free to take it) instead of at the usual Offset. */
         void retargetPlaced (int midiNote, float velocityLevel, int glideSamples, bool retriggerEnvelope,
-                             int grabDelay, bool placed, int atKeyPart);
+                             int grabDelay, bool placed, int atKeyPart, bool perOctave = false);
 
         /** Mono: the key that just took this voice over had already come up (a tap made while it
             waited its turn). The note plays for as long as that key was down, then releases. */
@@ -333,6 +349,7 @@ namespace grainlock
         bool keyGrabPlaced = false;         // the note's own grab was put on a spot (At Key, Snap)
         int sinceSend = 0;                  // samples since the Feedback send gain was last looked at
         bool refreshClockStale = false;     // a key took the voice over: the synced Refresh clock restarts
+        double holdBeats = -1.0;            // beats until the note releases itself; negative = no such count
         int nudgeHistory = 131072;          // the loop-point nudge looks no further back than 0.3 stage 1 could
 
         // Synced Refresh: re-grabs fall due on a clock that starts with the note.

@@ -111,6 +111,17 @@ namespace grainlock
         return beats[juce::jlimit (0, count - 1, syncIndex)];
     }
 
+    const juce::StringArray& holdTimeChoices()
+    {
+        static const juce::StringArray choices { "1/32", "1/16T", "1/16", "1/8T", "1/8", "1/4T", "1/4", "1/2", "1/1" };
+        return choices;
+    }
+
+    double holdTimeBeats (int index) noexcept
+    {
+        return grabSyncBeats (juce::jlimit (0, 8, index) + 1);
+    }
+
     double lfoSyncBeats (int syncIndex) noexcept
     {
         // Quarter-note beats per LFO cycle; triplets are two thirds of the straight value.
@@ -239,6 +250,16 @@ namespace grainlock
         layout.add (floatParam (ParamID::skipChance, "Skip", Range (0.0f, 100.0f, 1.0f), 0.0f, formatPercent));
         layout.add (floatParam (ParamID::feedback, "Feedback", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
 
+        // HOW NOTES ARE HELD, AND HOW MANY PLAY. The sustain pedal is on for new work and switched off
+        // when an older project is loaded (0.2 ignored it).
+        layout.add (boolParam (ParamID::sustainPedal, "Sustain Pedal", true));
+        layout.add (choiceParam (ParamID::holdMode, "Hold Mode", { "Normal", "Latch", "On Grid", "Full" }, (int) HoldMode::normal));
+        layout.add (choiceParam (ParamID::holdTime, "Hold Time", holdTimeChoices(), 6));
+        layout.add (boolParam (ParamID::glideLegato, "Glide Legato", false));
+        layout.add (boolParam (ParamID::glideRate, "Glide Per Octave", false));
+        layout.add (boolParam (ParamID::polyGlide, "Poly Glide", false));
+        layout.add (intParam (ParamID::voices, "Voices", 1, 8, 8, [] (int v, int) { return juce::String (v); }));
+
         // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
         layout.add (boolParam (ParamID::bypass, "Bypass", false));
 
@@ -303,6 +324,14 @@ namespace grainlock
         gridGrabs   = get (ParamID::gridGrabs);
         skipChance  = get (ParamID::skipChance);
         feedback    = get (ParamID::feedback);
+
+        sustainPedal = get (ParamID::sustainPedal);
+        holdMode     = get (ParamID::holdMode);
+        holdTime     = get (ParamID::holdTime);
+        glideLegato  = get (ParamID::glideLegato);
+        glideRate    = get (ParamID::glideRate);
+        polyGlide    = get (ParamID::polyGlide);
+        voices       = get (ParamID::voices);
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);
@@ -319,6 +348,7 @@ namespace grainlock
         static constexpr Legacy legacy[] = {
             { ParamID::autoGain, 0.0f },    // on for new work; older projects keep their level
             { ParamID::wheelDest, 0.0f },   // 0.2 ignored the mod wheel; it must not start a vibrato in an old project
+            { ParamID::sustainPedal, 0.0f },   // 0.2 ignored the sustain pedal; an old project's notes must still end at the key
         };
 
         for (const char* id : ParamID::all)

@@ -1236,12 +1236,13 @@ namespace
             int wrong = 0;
             for (const char* id : ParamID::all)
             {
-                const bool legacyOff = juce::String (id) == ParamID::autoGain || juce::String (id) == ParamID::wheelDest;
+                const bool legacyOff = juce::String (id) == ParamID::autoGain || juce::String (id) == ParamID::wheelDest
+                                       || juce::String (id) == ParamID::sustainPedal;
                 const bool ok = legacyOff ? plain (used, id) < 0.5f : atDefault (used, id);
                 wrong += ok ? 0 : 1;
             }
-            check (wrong == 0, fmt ("0.2 state onto a used instance: Auto Gain off, mod wheel off, all %d others at their defaults (%d wrong)",
-                                    (int) std::size (ParamID::all) - 2, wrong));
+            check (wrong == 0, fmt ("0.2 state onto a used instance: Auto Gain, mod wheel and sustain pedal off, all %d others at their defaults (%d wrong)",
+                                    (int) std::size (ParamID::all) - 3, wrong));
         }
         {
             // Saved by the first 0.3 build: has Auto Gain (on) and Formant Track, nothing later.
@@ -1252,13 +1253,15 @@ namespace
             used.setStateInformation (block.getData(), (int) block.getSize());
             int wrong = 0;
             for (const char* id : ParamID::all)
-                wrong += (juce::String (id) == ParamID::wheelDest ? plain (used, id) < 0.5f : atDefault (used, id)) ? 0 : 1;
+                wrong += ((juce::String (id) == ParamID::wheelDest || juce::String (id) == ParamID::sustainPedal) ? plain (used, id) < 0.5f
+                                                                                                                 : atDefault (used, id)) ? 0 : 1;
             check (wrong == 0 && plain (used, ParamID::autoGain) >= 0.5f,
                    fmt ("a state that saved Auto Gain on keeps it on; everything it did not save gets its older value (%d wrong)", wrong));
         }
         {
             GrainLockProcessor fresh;
-            check (plain (fresh, ParamID::autoGain) >= 0.5f, "a new instance starts with Auto Gain on");
+            check (plain (fresh, ParamID::autoGain) >= 0.5f && plain (fresh, ParamID::sustainPedal) >= 0.5f,
+                   "a new instance starts with Auto Gain and the sustain pedal on");
         }
     }
 
@@ -1445,6 +1448,7 @@ namespace
                 { ParamID::pitchLfoTrig, 4 }, { ParamID::formantLfoTrig, 4 }, { ParamID::grainLfoTrig, 4 },
                 { ParamID::wheelDest, 5 }, { ParamID::touchDest, 5 }, { ParamID::exprDest, 5 },
                 { ParamID::grabAt, 2 }, { ParamID::waitSync, 10 }, { ParamID::offsetSync, 10 }, { ParamID::refreshSync, 13 },
+                { ParamID::holdMode, 4 }, { ParamID::holdTime, 9 },
             };
             int wrong = 0, choices = 0;
             for (const auto& [id, count] : lists)
@@ -2677,6 +2681,255 @@ namespace
     }
 
     //==========================================================================
+    // 0.3 stage 4: how notes are held, and how many play
+
+    /** How loud a note is in a mix: the power of its first six harmonics, in dB, over 2^15 samples from the given position. */
+    double noteLevelDb (const std::vector<float>& x, size_t position, int midiNote)
+    {
+        const auto part = slice (x, position, 32768);
+        double power = 0.0;
+        for (int k = 1; k <= 6; ++k)
+            power += std::pow (10.0, lineLevelDb (part, 48000.0, noteHz (midiNote) * k) / 10.0);
+        return 10.0 * std::log10 (std::max (1.0e-20, power));
+    }
+
+    double noteAgainst (const std::vector<float>& x, size_t position, int midiNote, int referenceNote)
+    {
+        return noteLevelDb (x, position, midiNote) - noteLevelDb (x, position, referenceNote);
+    }
+
+    void testPedalAndHoldModes()
+    {
+        section ("0.3 G06: the sustain pedal, Latch, On Grid and Full decide when a note ends");
+
+        const auto input = noiseInput (144000, 51, 0.25f);
+        auto frozenOnly = [] (Harness& h)
+        {
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+        };
+
+        {
+            // The pedal holds a note past its key; lifting it lets the note go.
+            auto run = [&] (bool pedalOn)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::sustainPedal, pedalOn ? 1.0f : 0.0f);
+                return play (h, input, { keyDown (24000, 60), controller (30000, 64, 127), keyUp (36000, 60), controller (72000, 64, 0) });
+            };
+            const auto with = run (true), without = run (false);
+            check (largestSample (with, 60000, 70000) > 0.01f && juce::exactlyEqual (largestSample (with, 86000, 96000), 0.0f)
+                       && juce::exactlyEqual (largestSample (without, 50000, 60000), 0.0f),
+                   fmt ("pedal down, key up: the note sounds on (peak %.2f) until the pedal lifts (then %g); with Sustain Pedal off it ends at the key (%g)",
+                        (double) largestSample (with, 60000, 70000), (double) largestSample (with, 86000, 96000), (double) largestSample (without, 50000, 60000)));
+        }
+
+        {
+            // Mono under the pedal: two taps, the second takes the voice over, and both keys being up
+            // does not end it until the pedal lifts.
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::mono, 1.0f);
+            const auto out = play (h, input, { keyDown (24000, 57), controller (26000, 64, 127), keyUp (28800, 57),
+                                               keyDown (33600, 64), keyUp (38400, 64), controller (60000, 64, 0) });
+            const double pitch = centsBetween (pitchAt (out, 48000), noteHz (64));
+            check (std::abs (pitch) <= 5.0 && juce::exactlyEqual (largestSample (out, 75000, 85000), 0.0f),
+                   fmt ("mono under the pedal: the second tap is what sounds (%+.1f cents from E3), and it ends when the pedal lifts (%g)",
+                        pitch, (double) largestSample (out, 75000, 85000)));
+        }
+
+        {
+            // Latch: a chord stays after its keys are up; the next chord replaces it.
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+            const auto out = play (h, input, { keyDown (24000, 60), keyDown (24000, 64), keyDown (24000, 67),
+                                               keyUp (28800, 60), keyUp (28800, 64), keyUp (28800, 67),
+                                               keyDown (72000, 66), keyUp (74400, 66) });
+            const double chordE = noteAgainst (out, 36000, 64, 60);
+            const double afterC = noteAgainst (out, 100000, 60, 66);
+            check (std::abs (chordE) < 10.0 && afterC < -30.0 && largestSample (out, 130000, 140000) > 0.01f,
+                   fmt ("Latch: C-E-G rings on with every key up (E against C: %+.1f dB); tapping F# replaces the chord (C against F#: %+.1f dB) and F# rings on",
+                        chordE, afterC));
+        }
+
+        {
+            // Latch: a note pressed again while another key is down is taken out of the chord.
+            Harness h (48000.0, 256);
+            frozenOnly (h);
+            h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+            const auto out = play (h, input, { keyDown (24000, 60), keyDown (26400, 64), keyUp (28800, 64),
+                                               keyDown (31200, 64), keyUp (33600, 64), keyUp (36000, 60) });
+            const double e = noteAgainst (out, 60000, 64, 60);
+            check (e < -30.0 && largestSample (out, 130000, 140000) > 0.01f,
+                   fmt ("Latch: E pressed again under a held C leaves the chord (E against C: %+.1f dB) and C rings on", e));
+        }
+
+        {
+            // Latch is switched off, or the song stops: the chord ends, and the dry signal is back untouched.
+            auto stopBy = [&] (bool switchOff)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::release, 30.0f);
+                h.set (ParamID::holdMode, (float) (int) HoldMode::latch);
+                const auto first = play (h, input, { keyDown (24000, 60), keyUp (28800, 60) }, 0.0, 120.0);
+                const float ringing = largestDifference (first, input, 120000, 140000);
+                if (switchOff)
+                    h.set (ParamID::holdMode, (float) (int) HoldMode::normal);
+                const auto second = switchOff ? play (h, input, {}, 6.0, 120.0) : play (h, input, {});   // no play head: the song has stopped
+                return std::pair<float, float> (ringing, largestDifference (second, input, 24000, second.size()));
+            };
+            const auto off = stopBy (true), stopped = stopBy (false);
+            check (off.first > 0.02f && juce::exactlyEqual (off.second, 0.0f) && stopped.first > 0.02f && juce::exactlyEqual (stopped.second, 0.0f),
+                   fmt ("a latched note ends when Latch is switched off (dry untouched: %g) and when the song stops (%g)",
+                        (double) off.second, (double) stopped.second));
+        }
+
+        {
+            // Full: every note lasts one Hold Time (1/4 = 24000 samples at 120 BPM), whatever the key does.
+            auto run = [&] (bool tap)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::holdMode, (float) (int) HoldMode::full);
+                std::vector<ScriptEvent> events { keyDown (24000, 60) };
+                if (tap)
+                    events.push_back (keyUp (26400, 60));
+                return play (h, input, events, 0.0, 120.0);
+            };
+            const auto tapped = run (true), held = run (false);
+            check (largestSample (tapped, 42000, 47000) > 0.01f && juce::exactlyEqual (largestSample (tapped, 60000, 70000), 0.0f)
+                       && juce::exactlyEqual (largestDifference (tapped, held, 0, tapped.size()), 0.0f),
+                   fmt ("Full, Hold Time 1/4: a 50 ms tap sounds for the whole beat (peak %.2f near its end) and no longer (%g); a key held for seconds plays the same note (max difference %g)",
+                        (double) largestSample (tapped, 42000, 47000), (double) largestSample (tapped, 60000, 70000),
+                        (double) largestDifference (tapped, held, 0, tapped.size())));
+        }
+
+        {
+            // On Grid: a key that comes up between lines is released on the next line; one that comes
+            // up on a line is released there; with the song stopped it is released at once.
+            auto run = [&] (juce::int64 up, bool playing)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::holdMode, (float) (int) HoldMode::onGrid);
+                return play (h, input, { keyDown (30000, 60), keyUp (up, 60) }, playing ? 0.0 : -1.0, 120.0);
+            };
+            const auto between = run (40000, true), onLine = run (48000, true), stopped = run (40000, false);
+            const double carried = rmsDb (between, 44000, 47500) - rmsDb (between, 34000, 38000);
+            check (std::abs (carried) <= 1.0 && juce::exactlyEqual (largestSample (between, 60000, 70000), 0.0f),
+                   fmt ("On Grid, 1/4: a key let go 170 ms before the beat sounds on to the beat (%+.2f dB) and ends there (%g)",
+                        carried, (double) largestSample (between, 60000, 70000)));
+            check (juce::exactlyEqual (largestSample (onLine, 60000, 70000), 0.0f) && juce::exactlyEqual (largestSample (stopped, 52000, 60000), 0.0f),
+                   fmt ("On Grid: a key let go on the beat ends there, not a beat later (%g); with the song stopped it ends at the key (%g)",
+                        (double) largestSample (onLine, 60000, 70000), (double) largestSample (stopped, 52000, 60000)));
+        }
+
+        {
+            GrainLockProcessor p;
+            check (std::isinf (p.getTailLengthSeconds()), "the host is told the sound can go on for ever (a held note needs no input)");
+        }
+    }
+
+    void testVoicesAndGlide()
+    {
+        section ("0.3 G08: the voice limit takes release tails first; glide only when legato, per octave, and in poly");
+
+        const auto input = noiseInput (144000, 52, 0.25f);
+
+        {
+            // Voices 2, three keys held: the oldest key goes.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::voices, 2.0f);
+            const auto out = play (h, input, { keyDown (24000, 50), keyDown (28800, 61), keyDown (33600, 72) });
+            const double oldest = noteAgainst (out, 60000, 50, 61), newest = noteAgainst (out, 60000, 72, 61);
+            check (oldest < -30.0 && std::abs (newest) < 10.0,
+                   fmt ("Voices 2, three keys held: the oldest (D2) has gone (%+.1f dB against C#3); the other two play (C4 against C#3: %+.1f dB)", oldest, newest));
+        }
+
+        {
+            // Voices 2, one key held and one long release tail: a third note takes the tail, not the held key.
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::voices, 2.0f);
+            h.set (ParamID::release, 4000.0f);
+            const auto out = play (h, input, { keyDown (24000, 50), keyDown (28800, 61), keyUp (31200, 61), keyDown (36000, 72) });
+            const double held = noteAgainst (out, 60000, 50, 72), tail = noteAgainst (out, 60000, 61, 72);
+            check (std::abs (held) < 10.0 && tail < -30.0,
+                   fmt ("Voices 2, a held D2 and the 4 s tail of a C#3: a new C4 takes the tail (C#3 against C4: %+.1f dB), the held key stays (D2 against C4: %+.1f dB)",
+                        tail, held));
+        }
+
+        // Mono, Glide 200 ms, C2 then another key 250 ms later. The first note's Release is long, so its
+        // voice is still there for the second key to take over whether or not the keys overlap.
+        auto monoGlide = [&input] (bool legatoOnly, bool perOctave, int to, bool overlap)
+        {
+            Harness h (48000.0, 256);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::mono, 1.0f);
+            h.set (ParamID::glide, 200.0f);
+            h.set (ParamID::release, 2000.0f);
+            h.set (ParamID::glideLegato, legatoOnly ? 1.0f : 0.0f);
+            h.set (ParamID::glideRate, perOctave ? 1.0f : 0.0f);
+            std::vector<ScriptEvent> events { keyDown (24000, 48) };
+            if (! overlap)
+                events.push_back (keyUp (34000, 48));
+            events.push_back (keyDown (36000, to));
+            return play (h, input, events);
+        };
+
+        // The pitch around a moment, looked for only where it is expected (a frozen noise loop repeats
+        // just as well every two periods, so an open search can land an octave low).
+        auto centsAt = [] (const std::vector<float>& out, size_t position, double minHz, double maxHz, int note)
+        {
+            return centsBetween (shortPitchHz (out, position, 1024, minHz, maxHz), noteHz (note));
+        };
+
+        {
+            // 50 ms after the key a gliding note is still well below it.
+            const double separate = centsAt (monoGlide (true, false, 60, false), 38400, 200.0, 400.0, 60);
+            const double legato = centsAt (monoGlide (true, false, 60, true), 38400, 125.0, 240.0, 60);
+            const double always = centsAt (monoGlide (false, false, 60, false), 38400, 125.0, 240.0, 60);
+            check (std::abs (separate) <= 30.0 && legato < -500.0 && legato > -1000.0 && always < -500.0 && always > -1000.0,
+                   fmt ("Glide Legato, 50 ms after the key: a note played after a gap is on pitch (%+.0f cents), one played legato is still gliding (%+.0f cents); with it off both glide (%+.0f cents)",
+                        separate, legato, always));
+        }
+
+        {
+            // Per octave: two octaves take twice the Glide time. 300 ms after the key the plain glide
+            // has arrived; the per-octave one is about half an octave short.
+            const double plain = centsAt (monoGlide (false, false, 72, true), 50400, 400.0, 800.0, 72);
+            const double perOctave = centsAt (monoGlide (false, true, 72, true), 50400, 300.0, 500.0, 72);
+            check (std::abs (plain) <= 30.0 && perOctave < -350.0 && perOctave > -850.0,
+                   fmt ("Glide 200 ms over two octaves, 300 ms after the key: %+.0f cents from the note as a fixed time, %+.0f cents as a time per octave",
+                        plain, perOctave));
+        }
+
+        {
+            // Poly Glide: a new note slides in from the last key played.
+            auto run = [&input] (bool polyGlide)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::glide, 200.0f);
+                h.set (ParamID::release, 30.0f);
+                h.set (ParamID::polyGlide, polyGlide ? 1.0f : 0.0f);
+                return play (h, input, { keyDown (24000, 48), keyUp (30000, 48), keyDown (36000, 60) });
+            };
+            const double gliding = centsAt (run (true), 38400, 125.0, 240.0, 60);
+            const double plain = centsAt (run (false), 38400, 200.0, 400.0, 60);
+            check (std::abs (plain) <= 30.0 && gliding < -500.0 && gliding > -1000.0,
+                   fmt ("Poly Glide, 50 ms after the second key: %+.0f cents from the note with it on, %+.0f cents with it off", gliding, plain));
+        }
+    }
+
+    //==========================================================================
     // Reference sounds
 
     void compareWithTable (const char* name, const std::vector<float>& now, const float* table, int count)
@@ -3157,6 +3410,11 @@ int main (int argc, char** argv)
     {
         testWaitAndAtKey();
         testWaitingVoiceRules();
+    }
+    if (wants ("v03e"))
+    {
+        testPedalAndHoldModes();
+        testVoicesAndGlide();
     }
     if (wants ("v03d"))
     {
