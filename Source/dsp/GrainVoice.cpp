@@ -337,13 +337,17 @@ namespace grainlock
 
     int GrainVoice::nextEndDelay (const CaptureSource& source) const noexcept
     {
-        const int lag = juce::jmax (0, source.offsetSamples - atKeySamples);
-        const double previousEnd = (double) lastCaptureOffset + samplesSinceCapture;
-        return previousEnd < (double) lag ? (int) previousEnd : lag;
+        return juce::jmax (0, source.offsetSamples - atKeySamples);
     }
 
     bool GrainVoice::liveGrabAllowed (const VoiceContext& ctx, int endDelay) const noexcept
     {
+        // A note whose own slice was placed nearer to now than the usual distance (Snap): until the
+        // input has moved on by the difference there is nothing newer to take, and taking the same
+        // slice again would only crossfade two copies of it.
+        if (keyGrabPlaced && (double) lastCaptureOffset + samplesSinceCapture < (double) endDelay)
+            return false;
+
         if (ctx.tracker == nullptr || (ctx.threshold <= 0.0f && ! ctx.skipHiss))
             return true;
 
@@ -352,7 +356,7 @@ namespace grainlock
         const double period = sampleRate / frequencyFor (baseTargetPitch);
         const int region = (int) std::ceil (regionFor (ctx, period));
 
-        if (ctx.threshold > 0.0f && ! ctx.tracker->covered (endDelay, region, ctx.threshold))
+        if (ctx.threshold > 0.0f && ! ctx.tracker->covered (endDelay, region, ctx.threshold, false))
             return false;
         return ! (ctx.skipHiss && ctx.tracker->hissShare (endDelay, region) > 0.25f);   // more than a quarter of it is hiss
     }
@@ -383,7 +387,11 @@ namespace grainlock
         double xy = 0.0, xx = 0.0, yy = 0.0;
         for (int i = 0; i < points; ++i)
         {
-            x.theta = y.theta = ((double) i + 0.5) / (double) points;
+            const double step = ((double) i + 0.5) / (double) points;
+            x.theta = a.theta + step;
+            x.theta -= std::floor (x.theta);
+            y.theta = b.theta + step;
+            y.theta -= std::floor (y.theta);
             float xl = 0.0f, xr = 0.0f, yl = 0.0f, yr = 0.0f;
             renderState (x, ctx, xl, xr);
             renderState (y, ctx, yl, yr);
@@ -405,6 +413,35 @@ namespace grainlock
         const double fitLimit = state.lockOn ? available / ((double) n + maxSeam)
                                              : available / ((double) n * (1.0 + maxSeam));
         return juce::jmin (grain.capturePeriod() * (double) ratio * trackFactor (grain.capturePeriod()), fitLimit);
+    }
+
+    float GrainVoice::coherenceOf (const PlayState& state, int points) const noexcept
+    {
+        const auto& grain = grains[(size_t) state.grain];
+        const double c = cycleLengthOf (state);
+        const int n = state.taps;
+        if (grain.isEmpty() || ! (c > 0.0) || ! state.lockOn || n <= 1)
+            return 1.0f;
+
+        double summed = 0.0, single = 0.0;
+        for (int i = 0; i < points; ++i)
+        {
+            const double base = -c * ((double) i + 0.5) / (double) points;
+            float sumL = 0.0f, sumR = 0.0f;
+            for (int k = 0; k < n; ++k)
+            {
+                float a = 0.0f, b = 0.0f;
+                grain.read (base - (double) k * c, a, b);
+                sumL += a;
+                sumR += b;
+                single += (double) a * a + (double) b * b;
+            }
+            summed += (double) sumL * sumL + (double) sumR * sumR;
+        }
+
+        // The cycles are scaled by 1/sqrt(n): right when they are unrelated, too loud by up to
+        // sqrt(n) when they are alike (a source at the note's own pitch).
+        return single > 1.0e-20 ? (float) (1.0 / std::sqrt (juce::jlimit (1.0, (double) n, summed / single))) : 1.0f;
     }
 
     void GrainVoice::measure (PlayState& state, const VoiceContext& ctx, int points, float blend) const noexcept
@@ -447,28 +484,7 @@ namespace grainlock
             }
 
             if ((ctx.autoGain || ctx.feedbackOn) && state.lockOn && n > 1)
-            {
-                double summed = 0.0, single = 0.0;
-                for (int i = 0; i < points; ++i)
-                {
-                    const double base = -c * ((double) i + 0.5) / (double) points;
-                    float sumL = 0.0f, sumR = 0.0f;
-                    for (int k = 0; k < n; ++k)
-                    {
-                        float a = 0.0f, b = 0.0f;
-                        grain.read (base - (double) k * c, a, b);
-                        sumL += a;
-                        sumR += b;
-                        single += (double) a * a + (double) b * b;
-                    }
-                    summed += (double) sumL * sumL + (double) sumR * sumR;
-                }
-
-                // The cycles are scaled by 1/sqrt(n): right when they are unrelated, too loud by up to
-                // sqrt(n) when they are alike (a source at the note's own pitch).
-                if (single > 1.0e-20)
-                    coherence = (float) (1.0 / std::sqrt (juce::jlimit (1.0, (double) n, summed / single)));
-            }
+                coherence = coherenceOf (state, points);
         }
 
         const float gain = ctx.autoGain ? coherence : 1.0f;
@@ -500,6 +516,8 @@ namespace grainlock
         placedDelay = -1;
         placedGrab = false;
         atKeySamples = 0;
+        keyGrabPlaced = false;
+        sinceSend = 0;
         refreshClockStale = false;
         transition.active = false;
         envelope.reset();
@@ -537,6 +555,7 @@ namespace grainlock
     {
         waiting = false;
         atKeySamples = juce::jmax (0, atKeyPart);
+        keyGrabPlaced = placed;
         refreshClockStale = false;
         // The key is already up: the note plays for as long as the key was down. (One more than the
         // count, so the release lands on the same sample it would for a key held that long.)
@@ -587,6 +606,7 @@ namespace grainlock
         // its At Key distance. The synced Refresh clock starts again from this key.
         gateSamples = gateRemaining = 0;
         atKeySamples = 0;
+        keyGrabPlaced = false;
         noteAge = 0.0;
         refreshClockStale = true;
 
@@ -616,6 +636,7 @@ namespace grainlock
         placedDelay = juce::jmax (0, grabDelay);
         placedGrab = placed;
         atKeySamples = juce::jmax (0, atKeyPart);
+        keyGrabPlaced = placed;
     }
 
     void GrainVoice::releaseAfter (int samples) noexcept
@@ -696,6 +717,7 @@ namespace grainlock
         placedDelay = -1;
         placedGrab = false;
         atKeySamples = 0;
+        keyGrabPlaced = false;
         refreshClockStale = false;
         transition.active = false;
         envelope.reset();
@@ -821,7 +843,8 @@ namespace grainlock
         transition.length = juce::jmax (1, lengthSamples);
     }
 
-    void GrainVoice::beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept
+    void GrainVoice::beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source,
+                                     double firstRenderDelay) noexcept
     {
         const int previous = current;
         const int next = 1 - current;
@@ -831,8 +854,8 @@ namespace grainlock
         fresh.cycles = cyclesNow;
         fresh.lockOn = ctx.pitchLock;
 
-        // Where the new slice ends: a re-grab that waited ends where its key asked; otherwise at the
-        // usual lag, but never further back than the grain it replaces.
+        // Where the new slice ends: a re-grab that waited ends where its key (or its grid line)
+        // asked; any other at the note's usual distance from the input.
         CaptureSource from = source;
         bool nudge = true;
         if (placedDelay >= 0)
@@ -842,19 +865,27 @@ namespace grainlock
             placedDelay = -1;
             placedGrab = false;
         }
-        else if (pendingRecapture)
-        {
-            from.offsetSamples = juce::jmax (0, source.offsetSamples - atKeySamples);   // a key's own grab: where the Offset says
-        }
         else
         {
-            from.offsetSamples = nextEndDelay (source);   // a refresh: never behind the grain it replaces
+            from.offsetSamples = nextEndDelay (source);
         }
 
         // Sized for the note being glided TO, so a slice is always its own note's wavelength.
         auto& grain = grains[(size_t) fresh.grain];
         capture (grain, frequencyFor (baseTargetPitch), ctx, from, nudge);
         fresh.taps = tapsThatFit (grain, fresh.cycles, fresh.lockOn, ratio);
+
+        // Feedback: part of the new slice is this loop's own output, written back a few samples late
+        // (the read guard, the one-sample send, the low pass). The new state starts where that copy
+        // is in step with what it is a copy of, so each time round lands on the last instead of
+        // slipping later, which would pull the ringing part flat. (Exact when the loop reads the
+        // source at its own speed: Formant 0 and no key tracking.)
+        if (ctx.feedbackOn)
+        {
+            const double late = (double) lastCaptureOffset + 3.0 + firstRenderDelay + (double) ctx.feedbackLag;
+            const double theta = late * loopFrequency / sampleRate / (fresh.lockOn ? 1.0 : (double) juce::jmax (1, fresh.taps));
+            fresh.theta = theta - std::floor (theta);
+        }
 
         // A re-grab of the same shape moves towards its new measurements, so noise in them does not
         // become a level flutter at the Refresh rate; a different shape starts afresh.
@@ -885,6 +916,11 @@ namespace grainlock
         if (! active || waiting || stealing || ! ctx.live || tapeStopping)
             return;
 
+        // A grain taken within the last 1.5 ms already is the audio of this line (a key pressed on
+        // the line): a second grab would crossfade two copies of the same slice.
+        if (! pendingRecapture && samplesSinceCapture < 0.0015 * sampleRate)
+            return;
+
         if (skipsGrab (ctx, (juce::uint64) lineIndex))
             return;
 
@@ -913,7 +949,7 @@ namespace grainlock
         reshaped.gain = reshaped.gainTarget;
         sinceMeasure = 0;
 
-        const float correlation = correlationBetween (before, reshaped);
+        const float correlation = ctx.feedbackOn ? correlationOf (before, reshaped, ctx) : correlationBetween (before, reshaped);
         states[(size_t) next] = reshaped;
         current = next;
         startTransition ((int) (0.01 * sampleRate), correlation);
@@ -935,14 +971,16 @@ namespace grainlock
         const double n = (double) juce::jlimit (minCycles, maxCycles, cycles);
         const double span = juce::jmax ((n + maxSeam) * period * reach, n * (1.0 + maxSeam) * period * reach);
 
-        // The ring has long since overwritten the moment of a note held longer than it holds.
-        if (samplesSinceCapture + (double) lastCaptureOffset >= (double) source.ring->size())
+        // The ring has long since overwritten the moment of a note held longer than it holds. (As far
+        // back as 0.2 could reach, so an older project behaves as it did.)
+        const int history = juce::jmin (source.ring->size(), nudgeHistory);
+        if (samplesSinceCapture + (double) lastCaptureOffset >= (double) history)
             return false;
 
         const int spanSamples = (int) std::ceil (juce::jmin (span, (double) grain.maxSpan()));
         const int endDelay = lastCaptureOffset + (int) samplesSinceCapture;
 
-        if (spanSamples <= (int) oldGrain.span() + 1 || endDelay + spanSamples + 16 > source.ring->size())
+        if (spanSamples <= (int) oldGrain.span() + 1 || endDelay + spanSamples + 16 > history)
             return false;
 
         grain.capture (*source.ring, endDelay, spanSamples, period);
@@ -956,7 +994,7 @@ namespace grainlock
         extended.gain = extended.gainTarget;
         sinceMeasure = 0;
 
-        const float correlation = correlationBetween (before, extended);
+        const float correlation = ctx.feedbackOn ? correlationOf (before, extended, ctx) : correlationBetween (before, extended);
         states[(size_t) next] = extended;
         current = next;
         startTransition ((int) (0.01 * sampleRate), correlation);
@@ -1005,7 +1043,7 @@ namespace grainlock
 
             if (pendingRecapture)
             {
-                beginRecapture (frequency, ctx, source);
+                beginRecapture (frequency, ctx, source, 0.0);
             }
             else if (now.cycles != wanted || now.lockOn != ctx.pitchLock)
             {
@@ -1020,7 +1058,7 @@ namespace grainlock
                 if (holds)
                     beginReshape (ctx);
                 else if (mayGrab)
-                    beginRecapture (frequency, ctx, source);
+                    beginRecapture (frequency, ctx, source, 0.0);
                 else if ((live && ! ctx.stickyLive) || ! beginExtend (wanted, ctx.pitchLock, ctx, source))
                     beginReshape (ctx);
             }
@@ -1075,6 +1113,16 @@ namespace grainlock
         samplesSinceCapture += 1.0;
         ++sinceMeasure;
 
+        // Feedback: what a voice sends back is scaled by how alike its cycles are, and that changes as
+        // Formant moves. It is looked at again every 2 ms, so the send can never run ahead of it.
+        if (ctx.feedbackOn && ! transition.active && ++sinceSend >= (int) (0.002 * sampleRate))
+        {
+            sinceSend = 0;
+            auto& now = states[(size_t) current];
+            if (now.lockOn && now.taps > 1)
+                now.sendGain = coherenceOf (now, gainPointsRegrab);
+        }
+
         // The measurements follow Formant, Smooth and the Auto Gain switch as they move: at a loop
         // boundary, at most every 10 ms, and only when one of them has changed.
         if (wrapped && ! transition.active && sinceMeasure >= (int) (0.01 * sampleRate))
@@ -1107,7 +1155,7 @@ namespace grainlock
                 if (skipsGrab (ctx, ++refreshTurn))
                     refreshSkippedAt = samplesSinceCapture;
                 else
-                    beginRecapture (frequency, ctx, source);
+                    beginRecapture (frequency, ctx, source, 1.0);
 
                 // A note value: the next grab falls due one interval after this one was DUE, so the
                 // rhythm holds its tempo instead of drifting by a loop each time.

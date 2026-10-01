@@ -79,6 +79,7 @@ namespace grainlock
         bool gridActive = false;        // re-grabs come from the song's grid lines, not from the Refresh clock
         bool stickyLive = false;        // a Live grain may outlive a refresh, so it is kept and extended like a Hold one
         bool feedbackOn = false;        // voices also hand over what goes back into the input memory
+        float feedbackLag = 0.0f;       // how many samples late the feedback path's low pass hands audio back
     };
 
     /** What the voices send back into the input memory (Feedback), summed over one sample. */
@@ -262,7 +263,8 @@ namespace grainlock
                       bool nudge = true) noexcept;
         void renderState (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
         bool advance (PlayState& state, double frequency) const noexcept;
-        void beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept;
+        /** firstRenderDelay: 0 when the new state is heard in this same sample, 1 when from the next. */
+        void beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source, double firstRenderDelay) noexcept;
         void beginReshape (const VoiceContext& ctx) noexcept;
         bool beginExtend (int cycles, bool lockOn, const VoiceContext& ctx, const CaptureSource& source) noexcept;
         void startTransition (int lengthSamples, float correlation) noexcept;
@@ -278,6 +280,9 @@ namespace grainlock
         /** Skip: the same turn and key always decide the same way. */
         bool skipsGrab (const VoiceContext& ctx, juce::uint64 turn) const noexcept;
         float sendScale (const PlayState& state) const noexcept;
+        /** How much quieter the summed cycles of a state must be played to be as loud as one of them:
+            1 when they are unrelated, down to 1 / sqrt (taps) when they are alike. */
+        float coherenceOf (const PlayState& state, int points) const noexcept;
         /** How alike two play states sound, measured over one loop (0..1). */
         float correlationOf (const PlayState& a, const PlayState& b, const VoiceContext& ctx) const noexcept;
 
@@ -325,6 +330,8 @@ namespace grainlock
         // At Key: the note's first slice ended one loop region later than the Offset says, and every
         // later grab of the note keeps that distance from the input.
         int atKeySamples = 0;
+        bool keyGrabPlaced = false;         // the note's own grab was put on a spot (At Key, Snap)
+        int sinceSend = 0;                  // samples since the Feedback send gain was last looked at
         bool refreshClockStale = false;     // a key took the voice over: the synced Refresh clock restarts
         int nudgeHistory = 131072;          // the loop-point nudge looks no further back than 0.3 stage 1 could
 

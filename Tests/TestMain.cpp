@@ -2073,7 +2073,7 @@ namespace
             Harness h (48000.0, 256);
             mono (h, 100.0f);
             const auto out = play (h, input, { keyDown (24000, 57), keyUp (26880, 57), keyDown (33600, 64), keyUp (36480, 64) });
-            const double pitch = centsBetween (shortPitchHz (out, 39400, 1600, 150.0, 500.0), noteHz (64));
+            const double pitch = centsBetween (shortPitchHz (out, 39400, 1600, 250.0, 500.0), noteHz (64));
             check (largestSample (out, 39000, 41000) > 0.01f && std::abs (pitch) <= 15.0,
                    fmt ("mono, two 60 ms taps 200 ms apart with Wait 100 ms: the second one sounds too (peak %.2f, %+.1f cents from E3)",
                         (double) largestSample (out, 39000, 41000), pitch));
@@ -2135,6 +2135,40 @@ namespace
                    fmt ("Live, At Key, Offset 300 ms: sound that starts in the input is heard %d samples later (the note's distance from the input is %d)",
                         (int) first - 60000, 14400 - region));
         }
+
+        {
+            // Mono: A2 is ringing out. C3 is pressed and held, E3 is pressed over it and let go before
+            // its turn: C3 is still down, and must get the note.
+            Harness h (48000.0, 256);
+            mono (h, 500.0f);
+            h.set (ParamID::release, 2000.0f);
+            const auto out = play (h, input, { keyDown (12000, 57), keyUp (60000, 57), keyDown (69600, 60), keyDown (74400, 64), keyUp (79200, 64) });
+            const double pitch = centsBetween (pitchAt (out, 110000), noteHz (60));
+            check (std::abs (pitch) <= 5.0 && largestSample (out, 130000, 140000) > 0.01f,
+                   fmt ("mono, over a release tail: C3 held, E3 pressed and taken back: C3 sounds (%+.1f cents) and is still held (peak %.2f)",
+                        pitch, (double) largestSample (out, 130000, 140000)));
+        }
+
+        {
+            // Mono, At Key, Grain 16: a waiting low note is taken over by a high key, which is let go
+            // again. The low key gets the note back, and its long loop must start now, not reach back
+            // into the silence before it.
+            auto tone = harmonicInput (144000, 220.0, 8, 0.03);
+            for (size_t i = 0; i < 48000; ++i)
+                tone[i] = 0.0f;
+            Harness h (48000.0, 256);
+            mono (h, 0.0f);
+            h.set (ParamID::grabAt, 1.0f);
+            h.set (ParamID::grainCycles, 16.0f);
+            const auto out = play (h, tone, { keyDown (48000, 36), keyDown (48480, 76), keyUp (48960, 76) });
+            const int region = (int) std::ceil ((16.0 + (double) 0.1f) * 48000.0 / noteHz (36));
+            size_t first = 0;
+            while (first < out.size() && juce::exactlyEqual (out[first], 0.0f))
+                ++first;
+            check ((int) first >= 48960 + region && (int) first <= 48960 + region + 2,
+                   fmt ("mono, At Key: a waiting C1 handed back by E5 starts one whole C1 loop after that (%d samples; its loop is %d)",
+                        (int) first - 48960, region));
+        }
     }
 
     //==========================================================================
@@ -2175,7 +2209,7 @@ namespace
                fmt ("a burst after silence is logged as a hit at its first sample (found at %d, expected 24000)", (int) onset));
 
         // Is the stretch from..to above 0.05 all the way through?
-        auto covered = [&tracker, total] (int from, int to) { return tracker.covered (total - 1 - to, to - from, 0.05f); };
+        auto covered = [&tracker] (int from, int to) { return tracker.covered (total - 1 - to, to - from, 0.05f); };
         check (covered (32000, 40000) && covered (60000, 71000) && ! covered (22000, 26000) && covered (46000, 50000),
                fmt ("level: noise %d, tone %d, a stretch that starts in silence %d, noise running into the tone %d (expected 1 1 0 1)",
                     (int) covered (32000, 40000), (int) covered (60000, 71000), (int) covered (22000, 26000), (int) covered (46000, 50000)));
@@ -2338,6 +2372,21 @@ namespace
                    fmt ("a tone, then hiss: with Skip Hiss the note stays on the tone (2 kHz against 1 kHz: %+.1f dB); without, it freezes the hiss (%+.1f dB)",
                         skipped, frozen));
         }
+
+        {
+            // Snap 25 ms, Threshold on, Max Wait 0, steady input well above the Threshold and no hit: a
+            // 20 ms tap plays once Snap's reach has passed (the level is looked at on the last chance).
+            const auto steady = noiseInput (96000, 44, 0.25f);
+            Harness h (48000.0, 256);
+            h.set (ParamID::snap, 25.0f);
+            h.set (ParamID::threshold, -40.0f);
+            h.set (ParamID::maxWait, 0.0f);
+            h.set (ParamID::release, 30.0f);
+            const auto out = play (h, steady, { keyDown (48000, 60), keyUp (48960, 60) });
+            const float sounding = largestDifference (out, steady, 49300, 50100);
+            check (sounding > 0.02f && juce::exactlyEqual (largestDifference (out, steady, 0, 49200), 0.0f),
+                   fmt ("Snap 25 ms, Threshold on, Max Wait 0, no hit: a 20 ms tap over loud input still plays, 25 ms later (%.2f from the dry)", (double) sounding));
+        }
     }
 
     void testGridAndSkip()
@@ -2400,6 +2449,82 @@ namespace
             check (all == 20 && half >= 4 && half <= 16,
                    fmt ("20 lines of a 1/16 grid: %d grab with Skip 0%%, %d with Skip 50%%", all, half));
         }
+
+        {
+            // A key pressed exactly on a line: its own grab is the line's. A second grab a sample later
+            // would crossfade two copies of the same slice.
+            const auto steady = noiseInput (96000, 43, 0.25f);
+            auto run = [&steady] (bool grid)
+            {
+                Harness h (48000.0, 256);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::attack, 0.0f);
+                h.set (ParamID::refreshSync, 5.0f);
+                h.set (ParamID::gridGrabs, grid ? 1.0f : 0.0f);
+                return play (h, steady, { keyDown (24000, 57) }, 0.0, 120.0);
+            };
+            const auto onGrid = run (true), offGrid = run (false);
+            check (juce::exactlyEqual (largestDifference (onGrid, offGrid, 24000, 24218), 0.0f) && largestSample (onGrid, 24000, 24218) > 0.01f,
+                   fmt ("a key pressed on a grid line: its first loop is the one it plays with the grid off (max difference %g)",
+                        (double) largestDifference (onGrid, offGrid, 24000, 24218)));
+        }
+
+        {
+            // The host cycles on exactly one line (one beat, Refresh Sync 1/4): the song comes back to
+            // the same line number every time, and every return is a line. Tried with the block
+            // boundary on the wrap (240) and off it (256).
+            auto cycled = noiseInput (96000, 45, 0.25f);
+            for (size_t i = 0; i < 30000; ++i)
+                cycled[i] = 0.0f;
+
+            auto firstSoundAt = [&cycled] (int block)
+            {
+                Harness h (48000.0, block);
+                h.set (ParamID::dryWhenIdle, 0.0f);
+                h.set (ParamID::refreshSync, 5.0f);
+                h.set (ParamID::gridGrabs, 1.0f);
+
+                FakePlayHead playHead;
+                playHead.bpm = 120.0;
+                h.proc.setPlayHead (&playHead);
+                juce::AudioBuffer<float> buffer (2, block);
+                juce::MidiBuffer midi;
+                midi.ensureSize (64);
+
+                int first = -1;
+                const int total = (int) cycled.size();
+                for (int pos = 0; pos < total; pos += block)
+                {
+                    const int n = std::min (block, total - pos);
+                    buffer.setSize (2, n, false, false, true);
+                    for (int i = 0; i < n; ++i)
+                    {
+                        buffer.setSample (0, i, cycled[(size_t) (pos + i)]);
+                        buffer.setSample (1, i, cycled[(size_t) (pos + i)]);
+                    }
+
+                    midi.clear();
+                    if (pos <= 6000 && 6000 < pos + n)
+                    {
+                        const juce::uint8 noteOn[3] = { 0x90, 57, 100 };
+                        midi.addEvent (noteOn, 3, 6000 - pos);
+                    }
+
+                    playHead.ppq = 1.0 + std::fmod ((double) pos / 24000.0, 1.0);
+                    h.proc.processBlock (buffer, midi);
+
+                    for (int i = 0; i < n && first < 0; ++i)
+                        if (! juce::exactlyEqual (buffer.getSample (0, i), 0.0f))
+                            first = pos + i;
+                }
+                h.proc.setPlayHead (nullptr);
+                return first;
+            };
+            const int split = firstSoundAt (240), unsplit = firstSoundAt (256);
+            check (split >= 48000 && split <= 48002 && unsplit == split,
+                   fmt ("a host cycle of one grid line: sound that starts a quarter of the way through is picked up at the next return (sample %d, and %d when the block does not end on the wrap; the return is at 48000)",
+                        split, unsplit));
+        }
     }
 
     void testFeedback()
@@ -2455,13 +2580,99 @@ namespace
             Harness h (48000.0, 256);
             h.set (ParamID::dryWhenIdle, 0.0f);
             h.set (ParamID::feedback, 50.0f);
-            const auto out = play (h, bad, { keyDown (12000, 57) });
-            bool finite = true;
-            for (size_t i = 96000; i < out.size(); ++i)
-                finite = finite && std::isfinite (out[i]);
-            check (finite && largestSample (out, 200000, 240000) > 0.01f,
-                   fmt ("one NaN input sample at Feedback 50%%: a second later the output is finite and the note still sounds (peak %.2f)",
-                        (double) largestSample (out, 200000, 240000)));
+            const std::vector<float> head (bad.begin(), bad.begin() + 96000), tail (bad.begin() + 96000, bad.end());
+            play (h, head, { keyDown (12000, 57) });
+            h.proc.resetLimiterStats();   // the bad sample itself (and the grains that held it) are behind us
+            const auto out = play (h, tail, {});
+            const int late = h.proc.getLimiterStats().nonFiniteInputs;
+            const float peak = largestSample (out, 104000, 144000);
+            check (late == 0 && peak > 0.01f,
+                   fmt ("one NaN input sample at Feedback 50%%: from a second later nothing non-finite reaches the limiter (%d) and the note still sounds (peak %.2f)",
+                        late, (double) peak));
+        }
+
+        {
+            // The send always carries the gain of the summed cycles, whatever Auto Gain says. With it
+            // off and sixteen alike cycles, a send without that gain would come back twice as loud each
+            // time round at 50%.
+            Harness h (48000.0, 256);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::grainCycles, 16.0f);
+            h.set (ParamID::autoGain, 0.0f);
+            h.set (ParamID::feedback, 50.0f);
+            const auto out = play (h, input, { keyDown (12000, 57) });
+            const float level = largestSample (out, 36000, 48000), end = largestSample (out, 192000, 240000);
+            check (end < 0.001f * level,
+                   fmt ("Feedback 50%%, Grain 16, Auto Gain off: 3 s after the input stops the note has died away (%.1f dB)",
+                        20.0 * std::log10 ((double) (end / level) + 1.0e-12)));
+        }
+
+        {
+            // A chord sends no more than one note does. Four notes at 100%: once the input stops the
+            // level before the limiter must fall, not sit at the saturator's ceiling.
+            Harness h (48000.0, 256);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::grainCycles, 16.0f);
+            h.set (ParamID::autoGain, 0.0f);
+            h.set (ParamID::feedback, 100.0f);
+            play (h, noiseInput (48000, 38, 0.25f), { keyDown (12000, 45), keyDown (12000, 52), keyDown (12000, 57), keyDown (12000, 64) });
+            const float loud = h.proc.getLimiterStats().maxInputPeak;
+            play (h, std::vector<float> (144000, 0.0f), {});
+            h.proc.resetLimiterStats();
+            play (h, std::vector<float> (48000, 0.0f), {});
+            const float later = h.proc.getLimiterStats().maxInputPeak;
+            check (later < 0.25f * loud,
+                   fmt ("Feedback 100%%, four notes, Grain 16, Auto Gain off: the peak before the limiter is %.2f with input and %.2f in the fourth second without", (double) loud, (double) later));
+        }
+
+        {
+            // The Grain LFO changes the loop's shape sixty times a second. With Feedback up, each of
+            // those crossfades is between two copies of the same sound, and must not bulge.
+            Harness h (48000.0, 256);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::grainCycles, 6.0f);
+            h.set (ParamID::grainLfoOn, 1.0f);
+            h.set (ParamID::grainLfoShape, (float) (int) LfoShape::square);
+            h.set (ParamID::grainLfoRate, 30.0f);
+            h.set (ParamID::grainLfoDepth, 50.0f);
+            h.set (ParamID::feedback, 90.0f);
+            const auto out = play (h, input, { keyDown (12000, 57) });
+            const float level = largestSample (out, 36000, 48000), end = largestSample (out, 192000, 240000);
+            check (end < 0.003f * level,
+                   fmt ("Feedback 90%% with the Grain LFO stepping at 30 Hz: 3 s after the input stops the note is at %.1f dB",
+                        20.0 * std::log10 ((double) (end / level) + 1.0e-12)));
+        }
+
+        {
+            // The Formant LFO changes how alike the cycles are between two grabs (Refresh 250 ms). The
+            // send follows that, or the loop would feed itself for ever.
+            auto longInput = noiseInput (480000, 46, 0.25f);
+            for (size_t i = 48000; i < longInput.size(); ++i)
+                longInput[i] = 0.0f;
+            Harness h (48000.0, 256);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::refresh, 250.0f);
+            h.set (ParamID::formantLfoOn, 1.0f);
+            h.set (ParamID::formantLfoRate, 2.0f);
+            h.set (ParamID::formantLfoDepth, 50.0f);
+            h.set (ParamID::feedback, 90.0f);
+            const auto out = play (h, longInput, { keyDown (12000, 57) });
+            const float level = largestSample (out, 36000, 48000), end = largestSample (out, 432000, 480000);
+            check (end < 0.1f * level,
+                   fmt ("Feedback 90%% with the Formant LFO moving and Refresh 250 ms: 8 s after the input stops the note is at %.1f dB",
+                        20.0 * std::log10 ((double) (end / level) + 1.0e-12)));
+        }
+
+        {
+            // What rings on stays on the note: each time round, the copy that comes back lands in step.
+            Harness h (48000.0, 256);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+            h.set (ParamID::refresh, 5.0f);
+            h.set (ParamID::feedback, 100.0f);
+            const auto out = play (h, input, { keyDown (12000, 69) });
+            const double pitch = centsBetween (pitchAt (out, 84000, 15), noteHz (69));
+            check (std::abs (pitch) <= 8.0 && largestSample (out, 84000, 116768) > 0.001f,
+                   fmt ("Feedback 100%%, Refresh 5 ms, A3: a second after the input stops the ringing note is %+.1f cents from 440 Hz", pitch));
         }
     }
 

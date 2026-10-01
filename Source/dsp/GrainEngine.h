@@ -160,6 +160,8 @@ namespace grainlock
             juce::int64 giveUp = 0;    // Threshold: by now the grab happens whatever the input does
             int region = 0;            // source samples the loop will read
             int atKeyPart = 0;         // At Key: how much later than the Offset says the slice ends (the region)
+            juce::int64 dipHop = -1;   // Threshold: the dip that failed the last look; no pass while it is in the slice
+            float dipThreshold = 0.0f; // ...at this Threshold
             bool anchored = false;     // Snap found a hit: the region starts there
             bool unsnapped = false;    // Snap's window passed with no hit
         };
@@ -251,15 +253,16 @@ namespace grainlock
         bool gridActive = false;
         bool gridHasSeen = false;
         double gridBeats = 1.0, gridPpq = 0.0, gridPpqPerSample = 0.0;
-        juce::int64 gridLastSeen = 0, gridLastFired = 0, gridSinceFire = 0;
-        int gridHalfLine = 1;
+        juce::int64 gridLastSeen = 0;
+        double gridPrevPpq = 0.0, gridBeatsSinceFire = 0.0;
+        int gridHalfLine = 1;           // half a line in samples: the longest a grid grab may fade
 
         // Feedback: what the last sample's voices put back into the input memory.
         juce::SmoothedValue<float> feedback;
         bool feedbackActive = false;
         float feedbackLeft = 0.0f, feedbackRight = 0.0f;
         std::array<float, 2> feedbackDcIn {}, feedbackDcOut {}, feedbackLow {};
-        float feedbackDcCoeff = 0.997f, feedbackLowCoeff = 0.5f;
+        float feedbackDcCoeff = 0.997f, feedbackLowCoeff = 0.5f, feedbackLag = 0.0f;
         float captureRatioMax = 1.0f;
         int captureCyclesMax = 2;
         bool captureBothLayouts = false;

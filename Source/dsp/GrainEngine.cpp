@@ -33,8 +33,10 @@ namespace grainlock
         feedback.reset (sampleRate, 0.02);
         gateUp = (float) (1.0 / (0.005 * sampleRate));
         gateDown = (float) (1.0 / (0.050 * sampleRate));
-        feedbackDcCoeff = (float) (1.0 - juce::MathConstants<double>::twoPi * 20.0 / sampleRate);
+        // The DC blocker sits at 1 Hz: any higher and its phase lead pulls the ringing part of a low note sharp.
+        feedbackDcCoeff = (float) (1.0 - juce::MathConstants<double>::twoPi * 1.0 / sampleRate);
         feedbackLowCoeff = (float) (1.0 - std::exp (-juce::MathConstants<double>::twoPi * 6000.0 / sampleRate));
+        feedbackLag = (1.0f - feedbackLowCoeff) / feedbackLowCoeff;
         for (auto* s : { &wheel, &pressure, &expression })
             s->reset (sampleRate, 0.025);   // takes the steps out of 7-bit controller values
 
@@ -364,6 +366,7 @@ namespace grainlock
         ctx.gridActive = gridActive;
         ctx.stickyLive = stickyLive;
         ctx.feedbackOn = feedbackActive;
+        ctx.feedbackLag = feedbackLag;
         ctx.captureRatioMax = captureRatioMax;
         ctx.captureCyclesMax = captureCyclesMax;
         ctx.captureBothLayouts = captureBothLayouts;
@@ -592,26 +595,34 @@ namespace grainlock
         // line lands on the same sample at any block size.
         const double ppq = gridPpq + (double) sampleInBlock * gridPpqPerSample;
         const auto index = (juce::int64) std::floor (ppq / gridBeats + 1.0e-9);
-        ++gridSinceFire;
 
         if (! gridHasSeen)
         {
             gridHasSeen = true;
-            gridLastSeen = gridLastFired = index;
-            gridSinceFire = gridHalfLine;
+            gridLastSeen = index;
+            gridPrevPpq = ppq;
+            gridBeatsSinceFire = 0.5 * gridBeats;
             return;
         }
 
-        if (index == gridLastSeen)
+        gridBeatsSinceFire += gridPpqPerSample;
+
+        // A cycle that is exactly one line long comes back to the same line number every time: the
+        // jump back onto the line is the line.
+        const bool jumpedBack = ppq < gridPrevPpq - 0.5 * gridBeats;
+        const bool onLine = ppq - (double) index * gridBeats < 1.5 * gridPpqPerSample;
+        gridPrevPpq = ppq;
+
+        if (index == gridLastSeen && ! (jumpedBack && onLine))
             return;
         gridLastSeen = index;
 
-        // A line counts once, however the position got here (a locate, a cycle jump, a position
-        // reported a hair early and then again).
-        if (index == gridLastFired || gridSinceFire < (juce::int64) gridHalfLine)
+        // A line counts once, however the position got here (a locate, a position reported a hair
+        // early and then again): two lines are never less than half a line of song apart. Counted in
+        // beats, so a tempo change inside a line does not lose the next one.
+        if (gridBeatsSinceFire < 0.5 * gridBeats)
             return;
-        gridLastFired = index;
-        gridSinceFire = 0;
+        gridBeatsSinceFire = 0.0;
 
         for (auto& voice : voices)
             voice.gridLine (ctx, captureSource, index, gridHalfLine);
@@ -630,7 +641,7 @@ namespace grainlock
 
         plan = PendingGrab {};
         plan.centre = sampleClock + delay;
-        if (block.grabAtKey || conditional)
+        if (block.grabAtKey || conditional || delay > 0)   // every key that waits (Snap or Threshold may be switched on meanwhile)
             plan.region = (int) std::ceil (voices[(size_t) slot].plannedRegion (ctx, note));
         if (block.grabAtKey)
         {
@@ -692,8 +703,21 @@ namespace grainlock
         if (thresholdLevel > 0.0f)
         {
             const int lag = (int) juce::jlimit ((juce::int64) 0, (juce::int64) (ring.size() - 16), plan.dueTime - plan.planEnd);
-            const bool passes = ((sampleClock - plan.dueTime) & 31) == 0
-                                && tracker.covered (lag, plan.region, thresholdLevel);
+            // The last chance always looks, whatever sample it falls on. A dip that failed the last
+            // look is remembered: while it is still inside the slice the answer cannot change, so the
+            // slice is not walked again.
+            bool passes = false;
+            if (sampleClock >= plan.giveUp || ((sampleClock - plan.dueTime) & 31) == 0)
+            {
+                const bool stillBlocked = plan.dipHop >= 0 && juce::exactlyEqual (plan.dipThreshold, thresholdLevel)
+                                          && tracker.firstHopOf (lag, plan.region) <= plan.dipHop;
+                if (! stillBlocked)
+                {
+                    plan.dipHop = -1;
+                    plan.dipThreshold = thresholdLevel;
+                    passes = tracker.covered (lag, plan.region, thresholdLevel, true, &plan.dipHop);
+                }
+            }
 
             if (! passes)
             {
@@ -989,7 +1013,24 @@ namespace grainlock
         {
             if (stackSize > 0)
             {
-                monoKey.active = false;
+                // Another key is still down. With a held note sounding, the move is simply taken back
+                // (the fall-back below puts the note on the newest key). With nothing held to fall
+                // back from, that key takes the turn instead, or it would never sound.
+                if (monoVoice >= 0 && voices[(size_t) monoVoice].isHeld())
+                {
+                    monoKey.active = false;
+                }
+                else
+                {
+                    monoKey.note = stackTop();
+                    monoKey.pressedAt = sampleClock;
+                    if (block.grabAtKey || snapSamples > 0 || thresholdLevel > 0.0f)
+                    {
+                        PendingGrab plan;   // its loop is a different length: planned again, from now
+                        planGrab (juce::jmax (0, monoVoice), monoKey.note, lastContext, plan);
+                        monoKey.grab = plan;
+                    }
+                }
             }
             else if (! monoKey.released)
             {
@@ -1007,9 +1048,19 @@ namespace grainlock
             if (voice.getNote() == note)
             {
                 if (stackSize > 0)
+                {
                     voice.renote (stackTop());   // a key is still down under it: that key gets the note
+                    if (block.grabAtKey || snapSamples > 0 || thresholdLevel > 0.0f)
+                    {
+                        PendingGrab plan;        // its loop is a different length: planned again, from now
+                        planGrab (monoVoice, stackTop(), lastContext, plan);
+                        pendingGrabs[(size_t) monoVoice] = plan;
+                    }
+                }
                 else
+                {
                     voice.release();             // a first note released before it grabbed still plays its length
+                }
             }
             return;
         }
