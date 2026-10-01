@@ -52,6 +52,10 @@ public:
     const grainlock::LimiterStats& getLimiterStats() const noexcept { return engine.getLimiterStats(); }
     void resetLimiterStats() noexcept { engine.resetLimiterStats(); }
 
+    /** For the test runner: 0.2's seam, so this build can be compared with the 0.2 reference sound. */
+   #define GRAINLOCK_HAS_LEGACY_SEAM 1
+    void setLegacySeamForTests (bool shouldBeLegacy) noexcept { engine.setLegacySeamForTests (shouldBeLegacy); }
+
     // Factory presets (message thread).
     int getNumPresets() const;
     juce::String getPresetName (int index) const;

@@ -183,6 +183,7 @@ namespace grainlock
         ctx.formantRatio = juce::jlimit (0.25f, 4.0f, std::exp2 ((formantSemis.getNextValue() + lfoFormant) / 12.0f));
         ctx.trackAmount = trackAmount.getNextValue();
         ctx.autoGain = block.autoGain;
+        ctx.legacySeam = legacySeam;
         ctx.smooth = smoothFraction.getNextValue();
         ctx.sustain = sustain.getNextValue();
         ctx.targetCycles = juce::jlimit (minCycles, maxCycles, juce::roundToInt ((float) block.grainCycles + lfoCycles));

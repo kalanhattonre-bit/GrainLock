@@ -37,6 +37,7 @@ namespace grainlock
 
         envelope.prepare (sampleRate);
         level.reset (sampleRate, 0.005);
+        gainSlew = (float) (1.0 - std::exp (-1.0 / (0.010 * sampleRate)));
         kill();
     }
 
@@ -46,25 +47,29 @@ namespace grainlock
         return std::isfinite (f) ? juce::jlimit (2.0, sampleRate * 0.25, f) : 440.0;
     }
 
-    void GrainVoice::updateShape (const VoiceContext& ctx, double frequency, double targetFrequency) noexcept
+    void GrainVoice::updateShape (const VoiceContext& ctx) noexcept
     {
-        float track = 1.0f, trackTarget = 1.0f;
-        if (ctx.trackAmount > 0.0f)
-        {
-            // Like a sampler: a higher note reads the source faster, so its formants rise with it.
-            track = (float) (frequency / rootHz);
-            trackTarget = (float) (juce::jmax (frequency, targetFrequency) / rootHz);
-            if (ctx.trackAmount < 1.0f)   // only while the switch is fading
-            {
-                track = std::pow (track, ctx.trackAmount);
-                trackTarget = std::pow (trackTarget, ctx.trackAmount);
-            }
-        }
+        ratio = std::isfinite (ctx.formantRatio) ? juce::jlimit (0.25f, 4.0f, ctx.formantRatio) : 1.0f;
+        captureRatio = std::isfinite (ctx.captureRatioMax) ? juce::jlimit (0.25f, 4.0f, ctx.captureRatioMax) : 1.0f;
+        trackAmount = juce::jlimit (0.0f, 1.0f, ctx.trackAmount);
+    }
 
-        ratio = juce::jlimit (0.25f, 4.0f, ctx.formantRatio * track);
-        captureRatio = juce::jlimit (0.25f, 4.0f, ctx.captureRatioMax * juce::jmax (track, trackTarget));
-        if (! std::isfinite (ratio))        ratio = 1.0f;
-        if (! std::isfinite (captureRatio)) captureRatio = 1.0f;
+    double GrainVoice::trackFactor (double capturePeriod) const noexcept
+    {
+        if (trackAmount <= 0.0f || ! (capturePeriod > 0.0))
+            return 1.0;
+
+        const double full = sampleRate / (capturePeriod * rootHz);   // the grab's pitch against C3
+        return trackAmount >= 1.0f ? full : std::pow (full, (double) trackAmount);   // pow only while the switch fades
+    }
+
+    double GrainVoice::trackReach (double capturePeriod) const noexcept
+    {
+        if (trackAmount <= 0.0f || ! (capturePeriod > 0.0))
+            return 1.0;
+
+        const double full = sampleRate / (capturePeriod * rootHz);
+        return trackAmount >= 1.0f ? full : juce::jmax (1.0, full);
     }
 
     double GrainVoice::loopLengthSamples (const PlayState& state, double frequency) const noexcept
@@ -83,7 +88,7 @@ namespace grainlock
             return wanted;
 
         // Sized for the widest seam, so moving Smooth never changes how many taps fit.
-        const double cycleLength = grain.capturePeriod() * (double) formantRatio;
+        const double cycleLength = grain.capturePeriod() * (double) formantRatio * trackFactor (grain.capturePeriod());
         if (grain.isEmpty() || ! (cycleLength > 0.0))
             return 1;
 
@@ -93,36 +98,45 @@ namespace grainlock
     bool GrainVoice::grainHolds (const GrainBuffer& grain, int cycles, bool lockOn, float formantRatio) const noexcept
     {
         const double n = (double) juce::jlimit (minCycles, maxCycles, cycles);
-        const double cycleLength = grain.capturePeriod() * (double) formantRatio;
+        const double cycleLength = grain.capturePeriod() * (double) formantRatio * trackFactor (grain.capturePeriod());
         const double need = lockOn ? (n + maxSeam) * cycleLength : n * (1.0 + maxSeam) * cycleLength;
         return ! grain.isEmpty() && need <= grain.span();
     }
 
-    int GrainVoice::nudgedEndDelay (const CaptureSource& source, double period, int cycles, bool lockOn) const noexcept
+    int GrainVoice::nudgedEndDelay (const CaptureSource& source, const VoiceContext& ctx, double period) const noexcept
     {
-        // The loop jumps from the end of the slice to one loop length before it. Within one note period
-        // further back there is usually a point where those two places match better, so the join is
-        // smoother before the seam fade does anything. A source already at the note's pitch matches
-        // everywhere, and stays where it is.
-        juce::ignoreUnused (lockOn);
+        // With no seam fade to hide it, the loop jumps from the end of the slice to one loop length
+        // before it. A little further back there is usually a point where those two places agree, and
+        // ending the slice there takes most of the tick out. With a seam the fade already joins them
+        // (and the place it joins is fixed by the note, not by where the slice ends), so the grab
+        // stays exactly where the key put it.
         const auto& ring = *source.ring;
         const int base = source.offsetSamples;
-        const int loop = (int) std::lround ((double) juce::jlimit (minCycles, maxCycles, cycles) * period * (double) ratio);
-        const int reach = (int) std::ceil (period);
-        constexpr int window = 6;
+        const double cycles = (double) juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
+        const double loopSource = cycles * period * (double) ratio * trackFactor (period);   // source samples back to the join
+        const double loopPlayed = ctx.pitchLock ? period : cycles * period;                   // output samples per loop
+        constexpr int window = 8;
 
+        if (ctx.legacySeam || (double) ctx.smooth * loopPlayed >= (double) window)
+            return base;
+
+        const int loop = (int) std::lround (loopSource);
+        const int reach = (int) std::ceil (juce::jmin (period, 0.010 * sampleRate));
         if (loop < 4 || reach < 2 || base + reach + loop + window + 8 >= ring.size())
             return base;
 
+        // How badly the two places disagree, against how loud they are: 0 = identical, 2 = opposite.
+        // (A plain difference would just prefer quiet audio and slide the grab off a hit.)
         auto mismatch = [&ring, loop] (int delay)
         {
-            double sum = 0.0;
+            double difference = 0.0, energy = 1.0e-12;
             for (int j = 0; j < window; ++j)
             {
-                const double d = (double) ring.monoAt (delay + j) - (double) ring.monoAt (delay + j + loop);
-                sum += d * d;
+                const double a = ring.monoAt (delay + j), b = ring.monoAt (delay + j + loop);
+                difference += (a - b) * (a - b);
+                energy += a * a + b * b;
             }
-            return sum;
+            return difference / energy;
         };
 
         const int step = juce::jmax (1, reach / 32);
@@ -137,6 +151,20 @@ namespace grainlock
                 best = delay;
             }
         }
+
+        if (best != base && step > 1)
+        {
+            const int coarse = best;
+            for (int delay = juce::jmax (base, coarse - step + 1); delay < coarse + step && delay <= base + reach; ++delay)
+            {
+                const double m = mismatch (delay);
+                if (m < bestMismatch)
+                {
+                    bestMismatch = m;
+                    best = delay;
+                }
+            }
+        }
         return best;
     }
 
@@ -145,7 +173,7 @@ namespace grainlock
     {
         const double period = sampleRate / frequency;
         const double n = (double) juce::jlimit (minCycles, maxCycles, ctx.captureCyclesMax);
-        const double r = (double) captureRatio;
+        const double r = (double) captureRatio * trackReach (period);
 
         // Pitch Lock on needs (N + seam) periods; off needs N * (1 + seam).
         const double lockOnNeed = (n + maxSeam) * period * r;
@@ -153,7 +181,7 @@ namespace grainlock
         const double span = ctx.captureBothLayouts ? juce::jmax (lockOnNeed, lockOffNeed)
                                                    : (ctx.pitchLock ? lockOnNeed : lockOffNeed);
 
-        const int endDelay = nudge ? nudgedEndDelay (source, period, ctx.targetCycles, ctx.pitchLock) : source.offsetSamples;
+        const int endDelay = nudge ? nudgedEndDelay (source, ctx, period) : source.offsetSamples;
         const int ringLimit = source.ring->size() - endDelay - 8;
         const int limit = juce::jmin (grain.maxSpan(), ringLimit);
         const int spanSamples = (int) std::ceil (juce::jlimit (0.0, (double) limit, span));
@@ -173,7 +201,7 @@ namespace grainlock
         const int n = state.taps;
         const double fitLimit = state.lockOn ? available / ((double) n + maxSeam)
                                              : available / ((double) n * (1.0 + maxSeam));
-        return juce::jmin (grain.capturePeriod() * (double) ratio, fitLimit);
+        return juce::jmin (grain.capturePeriod() * (double) ratio * trackFactor (grain.capturePeriod()), fitLimit);
     }
 
     void GrainVoice::measure (PlayState& state, const VoiceContext& ctx, int points, float blend) const noexcept
@@ -193,7 +221,7 @@ namespace grainlock
             const double loop = state.lockOn ? c : (double) n * c;
             const double back = (double) n * c;   // how far before the fading-out audio the fading-in audio lies
 
-            if (seam > 0.0)
+            if (seam > 0.0 && ! ctx.legacySeam)
             {
                 double ab = 0.0, aa = 0.0, bb = 0.0;
                 for (int i = 0; i < seamPoints; ++i)
@@ -242,7 +270,7 @@ namespace grainlock
 
         const float b = juce::jlimit (0.0f, 1.0f, blend);
         state.seamRho += b * (rho - state.seamRho);
-        state.gain += b * (gain - state.gain);
+        state.gainTarget += b * (gain - state.gainTarget);
     }
 
     void GrainVoice::start (int midiNote, float velocityLevel, juce::uint64 order,
@@ -261,7 +289,7 @@ namespace grainlock
         current = 0;
         const int cycles = juce::jlimit (minCycles, maxCycles, ctx.targetCycles);
         const double frequency = frequencyFor (pitch.value + (double) ctx.globalSemitones);
-        updateShape (ctx, frequency, frequency);
+        updateShape (ctx);
         capture (grains[0], frequency, ctx, source);
 
         PlayState first;
@@ -270,6 +298,7 @@ namespace grainlock
         first.taps = tapsThatFit (grains[0], cycles, ctx.pitchLock, ratio);
         first.lockOn = ctx.pitchLock;
         measure (first, ctx, gainPointsFirst, 1.0f);
+        first.gain = first.gainTarget;   // the attack hides it
         states[0] = first;
         states[1] = first;
         transition.active = false;
@@ -348,7 +377,10 @@ namespace grainlock
             seamOut = (float) std::cos (u * halfPi);
             seamIn = (float) std::sin (u * halfPi);
 
-            if (! juce::exactlyEqual (state.seamRho, 0.0f))
+            // A correlation measured for a different cycle length (Formant moving fast) says nothing
+            // about this one: fall back to the plain fade until the next measurement.
+            if (! juce::exactlyEqual (state.seamRho, 0.0f)
+                && std::abs (cycleLength - state.measuredCycle) <= 0.03 * state.measuredCycle)
             {
                 // sin(pi u) = 2 sin(pi u / 2) cos(pi u / 2)
                 const float k = 1.0f / std::sqrt (1.0f + 2.0f * state.seamRho * seamOut * seamIn);
@@ -463,6 +495,7 @@ namespace grainlock
         const auto& before = states[(size_t) previous];
         const bool sameShape = fresh.taps == before.taps && fresh.lockOn == before.lockOn;
         measure (fresh, ctx, gainPointsRegrab, sameShape ? 0.3f : 1.0f);
+        fresh.gain = fresh.gainTarget;   // the crossfade into the new state hides it
         sinceMeasure = 0;
 
         states[(size_t) next] = fresh;
@@ -485,6 +518,7 @@ namespace grainlock
         reshaped.lockOn = ctx.pitchLock;
         reshaped.taps = tapsThatFit (grains[(size_t) reshaped.grain], reshaped.cycles, reshaped.lockOn, ratio);
         measure (reshaped, ctx, gainPointsFirst, 1.0f);
+        reshaped.gain = reshaped.gainTarget;
         sinceMeasure = 0;
 
         const float correlation = correlationBetween (before, reshaped);
@@ -505,7 +539,7 @@ namespace grainlock
         auto& grain = grains[(size_t) (1 - before.grain)];
 
         const double period = oldGrain.capturePeriod();
-        const double reach = juce::jlimit (0.25, 4.0, juce::jmax ((double) ratio * 1.12, (double) captureRatio));
+        const double reach = juce::jlimit (0.25, 4.0, juce::jmax ((double) ratio * 1.12, (double) captureRatio)) * trackReach (period);
         const double n = (double) juce::jlimit (minCycles, maxCycles, cycles);
         const double span = juce::jmax ((n + maxSeam) * period * reach, n * (1.0 + maxSeam) * period * reach);
 
@@ -527,6 +561,7 @@ namespace grainlock
         extended.lockOn = lockOn;
         extended.taps = tapsThatFit (grain, extended.cycles, lockOn, ratio);
         measure (extended, ctx, gainPointsFirst, 1.0f);
+        extended.gain = extended.gainTarget;
         sinceMeasure = 0;
 
         const float correlation = correlationBetween (before, extended);
@@ -542,7 +577,7 @@ namespace grainlock
             return;
 
         const double frequency = frequencyFor (pitch.next() + (double) ctx.globalSemitones);
-        updateShape (ctx, frequency, frequencyFor (pitch.target + (double) ctx.globalSemitones));
+        updateShape (ctx);
 
         if (! transition.active)
         {
@@ -576,12 +611,17 @@ namespace grainlock
         }
 
         float left = 0.0f, right = 0.0f;
-        renderState (states[(size_t) current], ctx, left, right);
+        {
+            auto& now = states[(size_t) current];
+            now.gain += gainSlew * (now.gainTarget - now.gain);
+            renderState (now, ctx, left, right);
+        }
 
         if (transition.active)
         {
             float oldLeft = 0.0f, oldRight = 0.0f;
             auto& fading = states[(size_t) (1 - current)];
+            fading.gain += gainSlew * (fading.gainTarget - fading.gain);
             renderState (fading, ctx, oldLeft, oldRight);
             advance (fading, frequency);
 
@@ -612,7 +652,7 @@ namespace grainlock
             if (std::abs (c - now.measuredCycle) > 0.01 * now.measuredCycle
                 || std::abs (ctx.smooth - now.measuredSeam) > 0.01f || now.measuredAuto != ctx.autoGain)
             {
-                measure (now, ctx, gainPointsRegrab, 0.5f);
+                measure (now, ctx, gainPointsRegrab, 1.0f);   // the applied gain glides to it
                 sinceMeasure = 0;
             }
         }

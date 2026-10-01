@@ -35,6 +35,16 @@ jobs:
       - name: Render UI snapshots
         run: build/GrainLockTests_artefacts/Release/GrainLockTests.exe --snapshot ui-snapshots
 
+      - name: Write sound fingerprints
+        run: build/GrainLockTests_artefacts/Release/GrainLockTests.exe --write-fingerprint fingerprints
+
+      - name: Upload sound fingerprints
+        uses: actions/upload-artifact@v7
+        with:
+          name: GrainLock-Fingerprints
+          path: fingerprints/
+          if-no-files-found: error
+
       - name: Upload UI snapshots
         uses: actions/upload-artifact@v7
         with:
@@ -48,7 +58,7 @@ jobs:
         run: cmake --build build --config Debug --target GrainLockTests --parallel
 
       - name: Allocation check (Debug CRT)
-        run: build/GrainLockTests_artefacts/Debug/GrainLockTests.exe --only alloc
+        run: build/GrainLockTests_artefacts/Debug/GrainLockTests.exe --only alloc --alloc-minutes 3
 
       # bash, not pwsh: pluginval.exe is a GUI-subsystem program, and PowerShell's call operator
       # returns without waiting for those, so it never sees the exit code.

@@ -77,6 +77,10 @@ namespace grainlock
 
         ScopeFifo& getScopeFifo() noexcept { return scopeFifo; }
 
+        /** Tests only: play with 0.2's seam (no correlation gain, no loop-point nudge), so a build can
+            be compared with the 0.2 reference sound. Call it between blocks. */
+        void setLegacySeamForTests (bool shouldBeLegacy) noexcept { legacySeam = shouldBeLegacy; }
+
         const LimiterStats& getLimiterStats() const noexcept { return limiter.getStats(); }
         void resetLimiterStats() noexcept { limiter.resetStats(); }
 
@@ -131,6 +135,7 @@ namespace grainlock
         bool monoMode = false;
         bool firstBlock = true;
         bool wasBypassed = false;
+        bool legacySeam = false;
 
         std::array<float, numLfos> lfoSmoothed {};
         std::array<float, numLfos> lfoLastScaled {};

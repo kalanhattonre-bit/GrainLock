@@ -184,7 +184,7 @@ void GrainLockProcessor::setStateInformation (const void* data, int sizeInBytes)
         if (xml->hasTagName (apvts.state.getType()))
         {
             migrateLegacyLfoState (*xml);   // v0.1 saved one shared LFO; move it onto the matching new one
-            migratePre03State (*xml);       // older projects keep their level: Auto Gain off
+            fillMissingParameters (*xml, apvts);   // what an older version did not save gets a definite value
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
         }
     }

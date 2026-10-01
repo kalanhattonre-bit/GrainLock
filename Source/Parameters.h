@@ -109,9 +109,11 @@ namespace grainlock
         settings land on the LFO for the target it pointed at. States without the old IDs pass through. */
     void migrateLegacyLfoState (juce::XmlElement& state);
 
-    /** A state saved before 0.3 has no Auto Gain value. Auto Gain is on for new work, but an old
-        project must sound as it did, so such a state gets it switched off. */
-    void migratePre03State (juce::XmlElement& state);
+    /** Gives every parameter that a saved state does not mention a definite value, before the state is
+        loaded. (JUCE leaves such a parameter at whatever the instance had, so an old preset loaded onto
+        a live instance would keep that instance's newer settings.) The value is what the older version
+        effectively did: Auto Gain off, because it did not exist; the default for everything else. */
+    void fillMissingParameters (juce::XmlElement& state, const juce::AudioProcessorValueTreeState& apvts);
 
     /** Note name as Cubase shows it by default (middle C, MIDI 60, is C3). */
     juce::String formatNoteName (int midiNote);

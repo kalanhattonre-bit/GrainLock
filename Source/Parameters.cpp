@@ -193,15 +193,39 @@ namespace grainlock
         autoGain     = get (ParamID::autoGain);
     }
 
-    void migratePre03State (juce::XmlElement& state)
+    void fillMissingParameters (juce::XmlElement& state, const juce::AudioProcessorValueTreeState& apvts)
     {
-        for (auto* child : state.getChildWithTagNameIterator ("PARAM"))
-            if (child->getStringAttribute ("id") == ParamID::autoGain)
-                return;   // saved by 0.3 or later
+        // Parameters whose default is not what a version without them did.
+        struct Legacy { const char* id; float value; };
+        static constexpr Legacy legacy[] = {
+            { ParamID::autoGain, 0.0f },   // on for new work; older projects keep their level
+        };
 
-        auto* node = state.createNewChildElement ("PARAM");
-        node->setAttribute ("id", ParamID::autoGain);
-        node->setAttribute ("value", 0.0);
+        for (const char* id : ParamID::all)
+        {
+            bool present = false;
+            for (auto* child : state.getChildWithTagNameIterator ("PARAM"))
+                if (child->getStringAttribute ("id") == id)
+                {
+                    present = true;
+                    break;
+                }
+            if (present)
+                continue;
+
+            const auto* parameter = apvts.getParameter (id);
+            if (parameter == nullptr)
+                continue;
+
+            float value = parameter->convertFrom0to1 (parameter->getDefaultValue());
+            for (const auto& entry : legacy)
+                if (juce::String (entry.id) == id)
+                    value = entry.value;
+
+            auto* node = state.createNewChildElement ("PARAM");
+            node->setAttribute ("id", id);
+            node->setAttribute ("value", (double) value);
+        }
     }
 
     void migrateLegacyLfoState (juce::XmlElement& state)

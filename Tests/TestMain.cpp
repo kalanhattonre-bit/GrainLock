@@ -13,6 +13,8 @@
 #include "dsp/Lfo.h"
 #include "ui/GrainLookAndFeel.h"
 #include "ui/MainPanel.h"
+#include "FingerprintScript.h"
+#include "Fingerprints.h"
 
 #include <algorithm>
 #include <array>
@@ -664,35 +666,39 @@ namespace
                 numHeld = 0;
             }
 
+            // Controllers, pressure (a 2-byte message, placed last), sound-off and reset: whatever the
+            // engine does with each, it must not allocate.
+            if (rng.nextInt (60) == 0)
+            {
+                static const int controllers[] = { 1, 11, 64, 120, 121 };
+                const juce::uint8 cc[3] = { 0xb0, (juce::uint8) controllers[rng.nextInt (5)], (juce::uint8) rng.nextInt (128) };
+                midi.addEvent (cc, 3, rng.nextInt (block));
+            }
+            if (rng.nextInt (90) == 0)
+            {
+                const juce::uint8 polyPressure[3] = { 0xa0, (juce::uint8) (30 + rng.nextInt (70)), (juce::uint8) rng.nextInt (128) };
+                midi.addEvent (polyPressure, 3, rng.nextInt (block));
+            }
+            if (rng.nextInt (90) == 0)
+            {
+                const juce::uint8 pressure[2] = { 0xd0, (juce::uint8) rng.nextInt (128) };
+                midi.addEvent (pressure, 2, block - 1);
+            }
+
             if (b % blocksPerChange == 0)
             {
-                // Sweep the settings that change code paths: modes, shapes, targets, sync.
-                h.set (ParamID::captureMode, (float) rng.nextInt (2));
-                h.set (ParamID::pitchLock, (float) rng.nextInt (2));
-                h.set (ParamID::mono, rng.nextInt (4) == 0 ? 1.0f : 0.0f);
-                h.set (ParamID::grainCycles, (float) (1 + rng.nextInt (16)));
-                h.set (ParamID::smooth, rng.nextFloat() * 50.0f);
-                h.set (ParamID::offset, rng.nextFloat() * 500.0f);
-                h.set (ParamID::refresh, 5.0f + rng.nextFloat() * 495.0f);
-                h.set (ParamID::formant, rng.nextFloat() * 24.0f - 12.0f);
-                h.set (ParamID::tune, (float) (rng.nextInt (49) - 24));
-                h.set (ParamID::fine, rng.nextFloat() * 200.0f - 100.0f);
-                h.set (ParamID::glide, rng.nextFloat() * 500.0f);
-                h.set (ParamID::attack, rng.nextFloat() * 200.0f);
-                h.set (ParamID::sustain, rng.nextFloat() * 100.0f);
-                h.set (ParamID::release, 1.0f + rng.nextFloat() * 800.0f);
-                for (const auto& ids : ParamID::lfo)
+                // Every parameter to a random legal value, so no feature can go untested by being left
+                // at its default. (A list written by hand had already missed the 0.3 additions.)
+                for (const char* id : ParamID::all)
                 {
-                    h.set (ids.on, (float) rng.nextInt (2));
-                    h.set (ids.rate, 0.1f + rng.nextFloat() * 20.0f);
-                    h.set (ids.sync, (float) rng.nextInt (13));
-                    h.set (ids.shape, (float) rng.nextInt (4));
-                    h.set (ids.depth, rng.nextFloat() * 100.0f);
+                    auto* p = h.proc.apvts.getParameter (id);
+                    p->setValueNotifyingHost (p->convertTo0to1 (p->convertFrom0to1 (rng.nextFloat())));
                 }
-                h.set (ParamID::mix, rng.nextFloat() * 100.0f);
-                h.set (ParamID::dryWhenIdle, (float) rng.nextInt (2));
-                h.set (ParamID::outGain, rng.nextFloat() * 24.0f - 12.0f);
                 playHead.playing = rng.nextInt (5) != 0;
+                if (rng.nextInt (4) == 0)
+                    playHead.bpm = 60.0 + rng.nextFloat() * 140.0;      // a tempo change
+                if (rng.nextInt (6) == 0)
+                    playHead.ppq = rng.nextFloat() * 64.0;              // a locate
             }
 
             {
@@ -941,26 +947,87 @@ namespace
         return 10.0 * std::log10 (std::max (1.0e-20, s / (double) std::max<size_t> (1, to - from)));
     }
 
+    float largestStep (const std::vector<float>& x, size_t from, size_t to)
+    {
+        float m = 0.0f;
+        for (size_t i = std::max<size_t> (from, 1); i < to && i < x.size(); ++i)
+            m = std::max (m, std::abs (x[i] - x[i - 1]));
+        return m;
+    }
+
     void testSeamFlatPower()
     {
         section ("0.3 G21: a source at the note's own pitch loops without a bump at the seam");
 
         // A pure 220 Hz sine frozen on A2 (220 Hz) with one cycle and a 25% seam. The two sides of the
         // seam are the same audio, so a plain equal-power fade swells by 3 dB there once per cycle,
-        // which adds harmonics to a sine. A flat-power seam leaves a sine a sine.
-        Harness h (48000.0, 512);
-        h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
-        h.set (ParamID::grainCycles, 1.0f);
-        h.set (ParamID::smooth, 25.0f);
-        std::vector<float> out;
-        h.runSignal (96000, { noteOnAt (24000, 57, 127) },
-                     [] (juce::int64 t, int) { return 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * (double) t / 48000.0); }, &out);
+        // which adds harmonics to a sine. A flat-power seam leaves a sine a sine. The same build with
+        // 0.2's seam switched back in must show the harmonics, or this test proves nothing.
+        auto addedHarmonics = [] (bool legacySeam)
+        {
+            Harness h (48000.0, 512);
+            h.proc.setLegacySeamForTests (legacySeam);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, 1.0f);
+            h.set (ParamID::smooth, 25.0f);
+            std::vector<float> out;
+            h.runSignal (96000, { noteOnAt (24000, 57, 127) },
+                         [] (juce::int64 t, int) { return 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * (double) t / 48000.0); }, &out);
 
-        const double fundamental = lineLevelDb (out, 48000.0, 220.0);
-        double worst = -200.0;
-        for (int harmonic = 2; harmonic <= 6; ++harmonic)
-            worst = std::max (worst, lineLevelDb (out, 48000.0, 220.0 * harmonic) - fundamental);
-        check (worst <= -50.0, fmt ("sine in, sine out: strongest added harmonic %.1f dB under the fundamental (limit -50)", worst));
+            const double fundamental = lineLevelDb (out, 48000.0, 220.0);
+            double worst = -200.0;
+            for (int harmonic = 2; harmonic <= 6; ++harmonic)
+                worst = std::max (worst, lineLevelDb (out, 48000.0, 220.0 * harmonic) - fundamental);
+            return worst;
+        };
+
+        const double before = addedHarmonics (true), after = addedHarmonics (false);
+        check (after <= -50.0 && before >= -40.0,
+               fmt ("sine in, sine out: strongest added harmonic %.1f dB under the fundamental (limit -50); with 0.2's seam it is %.1f dB", after, before));
+    }
+
+    void testLoopPointNudge()
+    {
+        section ("0.3 G21: with Smooth at 0 the grab ends where the loop joins best; with a seam it stays where the key put it");
+
+        // A 300 Hz sine frozen on A2 with no seam: the loop jumps between two places 218 samples apart
+        // in a 160-sample wave. Twice per wave those two places hold the same value.
+        auto wrapStep = [] (bool legacySeam)
+        {
+            Harness h (48000.0, 512);
+            h.proc.setLegacySeamForTests (legacySeam);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, 1.0f);
+            h.set (ParamID::smooth, 0.0f);
+            std::vector<float> out;
+            h.runSignal (96000, { noteOnAt (24100, 57, 127) },
+                         [] (juce::int64 t, int) { return 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 300.0 * (double) t / 48000.0); }, &out);
+            return largestStep (out, 72000, 96000);
+        };
+
+        const float nudged = wrapStep (false), plain = wrapStep (true);
+        check (nudged <= 0.5f * plain && plain > 0.05f,
+               fmt ("Smooth 0: the jump at the loop point is %.4f, against %.4f without the nudge", (double) nudged, (double) plain));
+
+        // Default Smooth (10%): a burst 8 ms before a low key after silence must still be caught,
+        // exactly as 0.2 caught it (the nudge does not run when there is a seam).
+        auto burstLevel = [] (bool legacySeam)
+        {
+            Harness h (48000.0, 512);
+            h.proc.setLegacySeamForTests (legacySeam);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            std::vector<float> out;
+            juce::Random rng (5);
+            std::vector<float> source ((size_t) 96000, 0.0f);
+            for (size_t i = 47616; i < 48000; ++i)   // 8 ms of noise ending at the key
+                source[i] = (rng.nextFloat() * 2.0f - 1.0f) * 0.4f;
+            h.runSignal (96000, { noteOnAt (48000, 36, 127) },
+                         [&source] (juce::int64 t, int) { return source[(size_t) t]; }, &out);
+            return rmsDb (out, 60000, 96000);
+        };
+        const double caught = burstLevel (false), reference = burstLevel (true);
+        check (reference > -60.0 && std::abs (caught - reference) <= 1.0,
+               fmt ("a hit 8 ms before a C1 key: frozen at %.1f dB, 0.2's seam gives %.1f dB (within 1 dB)", caught, reference));
     }
 
     void testAutoGain()
@@ -1006,6 +1073,38 @@ namespace
         };
         const double noiseChange = noiseLevel (true) - noiseLevel (false);
         check (std::abs (noiseChange) <= 1.0, fmt ("noise at Grain 8: Auto Gain changes the level by %.2f dB (limit 1)", noiseChange));
+
+        // Formant moved under a held note: the gain has to follow all the way, not stop half-way.
+        // (A second of this source is 220 whole cycles, so the two halves join seamlessly.)
+        auto settled = [&source] (float formantAtKey, float formantAfter)
+        {
+            Harness h (48000.0, 512);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, 16.0f);
+            h.set (ParamID::formant, formantAtKey);
+            std::vector<float> out;
+            h.runSignal (48000, { noteOnAt (24000, 57, 127) }, source, &out);
+            h.set (ParamID::formant, formantAfter);
+            h.runSignal (96000, {}, source, &out);
+            return rmsDb (out, 120000, 144000);
+        };
+        const double down = settled (1.0f, 0.0f) - settled (0.0f, 0.0f);
+        const double up = settled (0.0f, 1.0f) - settled (1.0f, 1.0f);
+        check (std::abs (down) <= 1.5 && std::abs (up) <= 1.5,
+               fmt ("Formant moved under a held Grain 16 note: the level ends within %+.2f dB (+1 to 0) and %+.2f dB (0 to +1) of a note started there (limit 1.5)", down, up));
+
+        // A key over digital silence must stay silent and finite.
+        {
+            Harness h (48000.0, 512);
+            h.proc.resetLimiterStats();
+            h.set (ParamID::grainCycles, 8.0f);
+            std::vector<float> out;
+            h.runSignal (48000, { noteOnAt (24000, 60, 100) }, [] (juce::int64, int) { return 0.0f; }, &out);
+            float peak = 0.0f;
+            for (const float v : out) peak = std::max (peak, std::abs (v));
+            check (juce::exactlyEqual (peak, 0.0f) && h.proc.getLimiterStats().nonFiniteInputs == 0,
+                   fmt ("a key over silence: output peak %g, %d non-finite samples", (double) peak, h.proc.getLimiterStats().nonFiniteInputs));
+        }
     }
 
     void testFormantTrack()
@@ -1048,41 +1147,193 @@ namespace
         const double off = bandBalance (false), on = bandBalance (true);
         check (off < -6.0 && on > 6.0,
                fmt ("C4 over a 1 kHz resonance: energy at 2 kHz against 1 kHz is %+.1f dB with the switch off and %+.1f dB with it on", off, on));
+
+        // At the root (C3) the switch must change nothing, also under a pitch bend that arrives after
+        // the key: the engine already raises the formant with the bend, and tracking must not add
+        // the same rise a second time.
+        auto bentRoot = [&source] (bool track)
+        {
+            Harness h (48000.0, 512);
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::grainCycles, 8.0f);
+            h.set (ParamID::formantTrack, track ? 1.0f : 0.0f);
+            std::vector<float> out;
+            const MidiEvent bendUp { 60000, { 0xe0, 0x7f, 0x7f } };
+            h.runSignal (96000, { noteOnAt (48000, 60, 127), bendUp },
+                         [&source] (juce::int64 t, int) { return source[(size_t) t]; }, &out);
+            return out;
+        };
+        const auto tracked = bentRoot (true), plain = bentRoot (false);
+        float difference = 0.0f, peak = 0.0f;
+        for (size_t i = 0; i < plain.size(); ++i)
+        {
+            difference = std::max (difference, std::abs (tracked[i] - plain[i]));
+            peak = std::max (peak, std::abs (plain[i]));
+        }
+        check (difference <= 1.0e-4f && peak > 0.001f,
+               fmt ("C3 with a bend after the key: switch on and off differ by %g at most (peak %.3f)", (double) difference, (double) peak));
     }
 
-    void testPre03Session()
+    void testOlderStates()
     {
-        section ("0.3: a project saved by 0.2 keeps its level (Auto Gain off); new work has it on");
+        section ("0.3: an older project or preset loads the same onto any instance (Auto Gain off; nothing left over)");
 
-        GrainLockProcessor fresh;
-        const bool freshOn = fresh.apvts.getRawParameterValue (ParamID::autoGain)->load() >= 0.5f;
+        // Which IDs 0.3 added: everything after Output Gain in the list. Later stages join by themselves.
+        std::vector<const char*> added;
+        {
+            bool past = false;
+            for (const char* id : ParamID::all)
+            {
+                if (past) added.push_back (id);
+                if (juce::String (id) == ParamID::outGain) past = true;
+            }
+        }
+        auto isAdded = [&added] (const juce::String& id)
+        {
+            for (const char* a : added) if (id == a) return true;
+            return false;
+        };
 
-        // What 0.2 saved: every parameter except the ones 0.3 added.
-        auto xml = fresh.apvts.copyState().createXml();
-        juce::Array<juce::XmlElement*> added;
-        for (auto* node : xml->getChildWithTagNameIterator ("PARAM"))
-            if (node->getStringAttribute ("id") == ParamID::autoGain || node->getStringAttribute ("id") == ParamID::formantTrack)
-                added.add (node);
-        for (auto* node : added)
-            xml->removeChildElement (node, true);
-        juce::MemoryBlock block;
-        juce::AudioProcessor::copyXmlToBinary (*xml, block);
+        // A state as an older version saved it: the defaults, without the IDs listed in keep == false.
+        auto olderState = [&] (const std::function<bool (const juce::String&)>& keep)
+        {
+            GrainLockProcessor source;
+            auto xml = source.apvts.copyState().createXml();
+            juce::Array<juce::XmlElement*> drop;
+            for (auto* node : xml->getChildWithTagNameIterator ("PARAM"))
+                if (! keep (node->getStringAttribute ("id")))
+                    drop.add (node);
+            for (auto* node : drop)
+                xml->removeChildElement (node, true);
+            juce::MemoryBlock block;
+            juce::AudioProcessor::copyXmlToBinary (*xml, block);
+            return block;
+        };
 
-        GrainLockProcessor old;
-        old.setStateInformation (block.getData(), (int) block.getSize());
-        const bool oldOff = old.apvts.getRawParameterValue (ParamID::autoGain)->load() < 0.5f;
-        const bool trackOff = old.apvts.getRawParameterValue (ParamID::formantTrack)->load() < 0.5f;
+        // The instance it lands on has been used: every parameter somewhere else.
+        auto scrambled = [] (GrainLockProcessor& p)
+        {
+            juce::Random rng (606);
+            for (const char* id : ParamID::all)
+            {
+                auto* param = p.apvts.getParameter (id);
+                param->setValueNotifyingHost (param->convertTo0to1 (param->convertFrom0to1 (rng.nextFloat())));
+            }
+        };
+        auto plain = [] (GrainLockProcessor& p, const char* id) { return p.apvts.getRawParameterValue (id)->load(); };
+        auto atDefault = [] (GrainLockProcessor& p, const char* id)
+        {
+            auto* param = p.apvts.getParameter (id);
+            return std::abs (param->getValue() - param->getDefaultValue()) < 1.0e-6f;
+        };
 
-        // And a 0.3 state keeps whatever it saved.
-        juce::MemoryBlock saved;
-        fresh.getStateInformation (saved);
-        GrainLockProcessor again;
-        again.setStateInformation (saved.getData(), (int) saved.getSize());
-        const bool keptOn = again.apvts.getRawParameterValue (ParamID::autoGain)->load() >= 0.5f;
+        {
+            // Saved by 0.2: none of the 0.3 IDs.
+            const auto block = olderState ([&] (const juce::String& id) { return ! isAdded (id); });
+            GrainLockProcessor used;
+            scrambled (used);
+            used.setStateInformation (block.getData(), (int) block.getSize());
+            int wrong = 0;
+            for (const char* id : ParamID::all)
+            {
+                const bool ok = juce::String (id) == ParamID::autoGain ? plain (used, id) < 0.5f : atDefault (used, id);
+                wrong += ok ? 0 : 1;
+            }
+            check (wrong == 0, fmt ("0.2 state onto a used instance: Auto Gain off, all %d others at their defaults (%d wrong)",
+                                    (int) std::size (ParamID::all) - 1, wrong));
+        }
+        {
+            // Saved by the first 0.3 build: has Auto Gain (on) and Formant Track, nothing later.
+            const auto block = olderState ([&] (const juce::String& id)
+                                           { return ! isAdded (id) || id == ParamID::autoGain || id == ParamID::formantTrack; });
+            GrainLockProcessor used;
+            scrambled (used);
+            used.setStateInformation (block.getData(), (int) block.getSize());
+            int wrong = 0;
+            for (const char* id : ParamID::all)
+                wrong += atDefault (used, id) ? 0 : 1;
+            check (wrong == 0 && plain (used, ParamID::autoGain) >= 0.5f,
+                   fmt ("a state that saved Auto Gain on keeps it on; everything else at its default (%d wrong)", wrong));
+        }
+        {
+            GrainLockProcessor fresh;
+            check (plain (fresh, ParamID::autoGain) >= 0.5f, "a new instance starts with Auto Gain on");
+        }
+    }
 
-        check (freshOn && oldOff && trackOff && keptOn,
-               fmt ("new instance on (%d), 0.2 project off (%d) with Formant Track off (%d), 0.3 project keeps on (%d)",
-                    (int) freshOn, (int) oldOff, (int) trackOff, (int) keptOn));
+    //==========================================================================
+    // Reference sounds
+
+    void compareWithTable (const char* name, const std::vector<float>& now, const float* table, int count)
+    {
+        if (count == 0)
+        {
+            std::printf ("    %s: no table committed yet, nothing compared\n", name);
+            return;
+        }
+        if ((int) now.size() != count)
+        {
+            check (false, fmt ("%s: %d numbers now, %d in the table", name, (int) now.size(), count));
+            return;
+        }
+
+        int wrong = 0, worstAt = -1;
+        double worst = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            const double a = now[(size_t) i], b = table[i];
+            const double excess = std::abs (a - b) - (0.001 * std::max (std::abs (a), std::abs (b)) + 1.0e-6);
+            if (excess > 0.0)
+            {
+                ++wrong;
+                const double relative = std::abs (a - b) / std::max (1.0e-9, std::max (std::abs (a), std::abs (b)));
+                if (relative > worst) { worst = relative; worstAt = i; }
+            }
+        }
+        check (wrong == 0, wrong == 0 ? fmt ("%s: all %d numbers within 0.1%%", name, count)
+                                      : fmt ("%s: %d of %d numbers differ; worst %.1f%% at %s", name, wrong, count, 100.0 * worst,
+                                             fingerprint::describe (worstAt).toRawUTF8()));
+    }
+
+    void testFingerprints()
+    {
+        section ("Reference sounds: with 0.2's seam this build is 0.2; the 0.3 default sound has not drifted");
+        compareWithTable ("table A (0.2)", fingerprint::table (true), fingerprint::tableA, fingerprint::countA);
+        compareWithTable ("table B (0.3 defaults)", fingerprint::table (false), fingerprint::tableB, fingerprint::countB);
+    }
+
+    void testBlockSizes()
+    {
+        section ("The same notes give the same sound at any block size");
+
+        for (const int config : { 0, 4, 6 })   // defaults, Glitch Drums (synced S&H), mono glide + LFOs
+        {
+            const auto reference = fingerprint::render (config, 0, false, [] (int) { return 256; });
+            float worst = 0.0f;
+            int worstBlock = 0;
+            for (const int block : { 1, 64, 480, 4096, -1 })
+            {
+                juce::Random sizes (11);
+                const auto out = fingerprint::render (config, 0, false, [&] (int) { return block > 0 ? block : 1 + sizes.nextInt (700); });
+                float d = 0.0f;
+                for (size_t i = 0; i < out.size(); ++i)
+                    d = std::max (d, std::abs (out[i] - reference[i]));
+                if (d > worst) { worst = d; worstBlock = block; }
+            }
+            check (worst <= 1.0e-4f, fmt ("%s: blocks of 1, 64, 480, 4096 and random sizes differ from 256 by %g at most (worst: %d)",
+                                          fingerprint::describe (config * fingerprint::numSources * fingerprint::numbersPerRun).upToFirstOccurrenceOf (",", false, false).toRawUTF8(),
+                                          (double) worst, worstBlock));
+        }
+    }
+
+    int writeFingerprints (const juce::String& directory)
+    {
+        const auto dir = juce::File::getCurrentWorkingDirectory().getChildFile (directory);
+        dir.createDirectory();
+        bool ok = fingerprint::write (dir.getChildFile ("fingerprint-A.txt"), fingerprint::table (true));
+        ok = fingerprint::write (dir.getChildFile ("fingerprint-B.txt"), fingerprint::table (false)) && ok;
+        std::printf ("%s fingerprints to %s\n", ok ? "wrote" : "FAILED to write", dir.getFullPathName().toRawUTF8());
+        return ok ? 0 : 1;
     }
 
     void testLfoSyncedSampleHold()
@@ -1449,6 +1700,8 @@ int main (int argc, char** argv)
             allocMinutes = juce::String (argv[++i]).getDoubleValue();
         else if (arg == "--snapshot" && i + 1 < argc)
             return renderSnapshots (argv[++i]);
+        else if (arg == "--write-fingerprint" && i + 1 < argc)
+            return writeFingerprints (argv[++i]);
     }
 
     auto wants = [&only] (const char* name) { return only.isEmpty() || only == name; };
@@ -1473,9 +1726,15 @@ int main (int argc, char** argv)
     if (wants ("v03"))
     {
         testSeamFlatPower();
+        testLoopPointNudge();
         testAutoGain();
         testFormantTrack();
-        testPre03Session();
+        testOlderStates();
+    }
+    if (wants ("reference"))
+    {
+        testFingerprints();
+        testBlockSizes();
     }
 
     std::printf ("\n%s: %d failure(s)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);
