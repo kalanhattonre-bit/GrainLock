@@ -127,6 +127,17 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
     p.glidePerOctave    = asBool (params.glideRate, d.glidePerOctave);
     p.polyGlide         = asBool (params.polyGlide, d.polyGlide);
     p.voices            = juce::jlimit (1, 8, asInt (params.voices, d.voices));
+
+    p.lowCutHz          = juce::jlimit (20.0f, 2000.0f, value (params.lowCut, d.lowCutHz));
+    p.highCutHz         = juce::jlimit (500.0f, 20000.0f, value (params.highCut, d.highCutHz));
+    p.tiltDb            = juce::jlimit (-6.0f, 6.0f, value (params.tilt, d.tiltDb));
+    p.driveDb           = juce::jlimit (0.0f, 24.0f, value (params.drive, d.driveDb));
+    p.hollowPercent     = juce::jlimit (0.0f, 100.0f, value (params.hollow, d.hollowPercent));
+    p.diffusePercent    = juce::jlimit (0.0f, 100.0f, value (params.diffuse, d.diffusePercent));
+    p.spreadPercent     = juce::jlimit (0.0f, 100.0f, value (params.spread, d.spreadPercent));
+    p.spreadMode        = (SpreadMode) juce::jlimit (0, numSpreadModes - 1, asInt (params.spreadMode, (int) d.spreadMode));
+    p.widthPercent      = juce::jlimit (0.0f, 100.0f, value (params.width, d.widthPercent));
+    p.driftPercent      = juce::jlimit (0.0f, 100.0f, value (params.drift, d.driftPercent));
     return p;
 }
 

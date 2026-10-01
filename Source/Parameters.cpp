@@ -38,6 +38,18 @@ namespace grainlock
 
         float parseNumber (const juce::String& text) { return text.trim().getFloatValue(); }
 
+        juce::String formatCutHz (float hz)
+        {
+            return hz < 1000.0f ? juce::String (juce::roundToInt (hz)) + " Hz" : juce::String (hz / 1000.0f, 1) + " kHz";
+        }
+
+        float parseCutHz (const juce::String& text)
+        {
+            const auto t = text.trim().toLowerCase();
+            const float v = t.getFloatValue();
+            return t.contains ("k") ? v * 1000.0f : v;
+        }
+
         /** For whole-number parameters: getIntValue stops at a leading '+', so "+3 st" would read as 0. */
         int parseWhole (const juce::String& text, int) { return juce::roundToInt (text.trim().getFloatValue()); }
 
@@ -260,6 +272,23 @@ namespace grainlock
         layout.add (boolParam (ParamID::polyGlide, "Poly Glide", false));
         layout.add (intParam (ParamID::voices, "Voices", 1, 8, 8, [] (int v, int) { return juce::String (v); }));
 
+        // TONE AND STEREO, on the frozen sound only. Every one of these is off by default, and off
+        // means not in the path.
+        layout.add (floatParam (ParamID::lowCut, "Low Cut", skewedRange (20.0f, 2000.0f, 1.0f, 200.0f), 20.0f,
+                                [] (float v, int) { return v <= 20.0f ? juce::String ("Off") : formatCutHz (v); },
+                                [] (const juce::String& text) { return text.trim().equalsIgnoreCase ("off") ? 20.0f : parseCutHz (text); }));
+        layout.add (floatParam (ParamID::highCut, "High Cut", skewedRange (500.0f, 20000.0f, 1.0f, 4000.0f), 20000.0f,
+                                [] (float v, int) { return v >= 20000.0f ? juce::String ("Off") : formatCutHz (v); },
+                                [] (const juce::String& text) { return text.trim().equalsIgnoreCase ("off") ? 20000.0f : parseCutHz (text); }));
+        layout.add (floatParam (ParamID::tilt, "Tilt", Range (-6.0f, 6.0f, 0.1f), 0.0f, formatDb));
+        layout.add (floatParam (ParamID::drive, "Drive", Range (0.0f, 24.0f, 0.1f), 0.0f, formatDb));
+        layout.add (floatParam (ParamID::hollow, "Hollow", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
+        layout.add (floatParam (ParamID::diffuse, "Diffuse", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
+        layout.add (floatParam (ParamID::spread, "Spread", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
+        layout.add (choiceParam (ParamID::spreadMode, "Spread Mode", { "Alternate", "By Pitch", "Random" }, (int) SpreadMode::alternate));
+        layout.add (floatParam (ParamID::width, "Width", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
+        layout.add (floatParam (ParamID::drift, "Drift", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
+
         // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
         layout.add (boolParam (ParamID::bypass, "Bypass", false));
 
@@ -332,6 +361,17 @@ namespace grainlock
         glideRate    = get (ParamID::glideRate);
         polyGlide    = get (ParamID::polyGlide);
         voices       = get (ParamID::voices);
+
+        lowCut     = get (ParamID::lowCut);
+        highCut    = get (ParamID::highCut);
+        tilt       = get (ParamID::tilt);
+        drive      = get (ParamID::drive);
+        hollow     = get (ParamID::hollow);
+        diffuse    = get (ParamID::diffuse);
+        spread     = get (ParamID::spread);
+        spreadMode = get (ParamID::spreadMode);
+        width      = get (ParamID::width);
+        drift      = get (ParamID::drift);
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);

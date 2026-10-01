@@ -1285,8 +1285,11 @@ namespace
     /** Plays input (both channels) through h with the events. startPpq >= 0 adds a running transport
         at bpm whose position is worked out from the sample count. Returns the left output. */
     std::vector<float> play (Harness& h, const std::vector<float>& input, const std::vector<ScriptEvent>& events,
-                             double startPpq = -1.0, double bpm = 120.0)
+                             double startPpq = -1.0, double bpm = 120.0, std::vector<float>* rightOut = nullptr)
     {
+        if (rightOut != nullptr)
+            rightOut->assign (input.size(), 0.0f);
+
         FakePlayHead playHead;
         playHead.bpm = bpm;
         if (startPpq >= 0.0)
@@ -1318,7 +1321,11 @@ namespace
             playHead.ppq = std::max (0.0, startPpq) + (double) pos * bpm / 60.0 / h.rate;
             h.proc.processBlock (buffer, midi);
             for (int i = 0; i < n; ++i)
+            {
                 out[pos + (size_t) i] = buffer.getSample (0, i);
+                if (rightOut != nullptr)
+                    (*rightOut)[pos + (size_t) i] = buffer.getSample (1, i);
+            }
         }
 
         h.proc.setPlayHead (nullptr);
@@ -1448,7 +1455,7 @@ namespace
                 { ParamID::pitchLfoTrig, 4 }, { ParamID::formantLfoTrig, 4 }, { ParamID::grainLfoTrig, 4 },
                 { ParamID::wheelDest, 5 }, { ParamID::touchDest, 5 }, { ParamID::exprDest, 5 },
                 { ParamID::grabAt, 2 }, { ParamID::waitSync, 10 }, { ParamID::offsetSync, 10 }, { ParamID::refreshSync, 13 },
-                { ParamID::holdMode, 4 }, { ParamID::holdTime, 9 },
+                { ParamID::holdMode, 4 }, { ParamID::holdTime, 9 }, { ParamID::spreadMode, 3 },
             };
             int wrong = 0, choices = 0;
             for (const auto& [id, count] : lists)
@@ -2930,6 +2937,279 @@ namespace
     }
 
     //==========================================================================
+    // 0.3 stage 5: tone and stereo, on the frozen sound only
+
+    double correlation (const std::vector<float>& a, const std::vector<float>& b, size_t from, size_t to)
+    {
+        double ab = 0.0, aa = 0.0, bb = 0.0;
+        for (size_t i = from; i < to; ++i)
+        {
+            ab += (double) a[i] * b[i];
+            aa += (double) a[i] * a[i];
+            bb += (double) b[i] * b[i];
+        }
+        return ab / std::sqrt (std::max (1.0e-30, aa * bb));
+    }
+
+    void testTone()
+    {
+        section ("0.3 G26 / G24: Low Cut, High Cut, Tilt, Drive and Hollow shape the frozen sound; Diffuse smears it");
+
+        auto frozenOnly = [] (Harness& h)
+        {
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+        };
+
+        {
+            // The same held A2 over the same noise, one control at a time. The note's 1st harmonic is
+            // 220 Hz and its 20th is 4400 Hz.
+            const auto noise = noiseInput (144000, 61, 0.25f);
+            auto run = [&] (const char* id, float value)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                if (id != nullptr)
+                    h.set (id, value);
+                return slice (play (h, noise, { keyDown (24000, 57) }), 100000, 32768);
+            };
+            auto line = [] (const std::vector<float>& part, double hz) { return lineLevelDb (part, 48000.0, hz); };
+
+            const auto plain = run (nullptr, 0.0f), lowCut = run (ParamID::lowCut, 2000.0f), highCut = run (ParamID::highCut, 500.0f), tilted = run (ParamID::tilt, 6.0f);
+            const double lowCutLow = line (lowCut, 220.0) - line (plain, 220.0), lowCutHigh = line (lowCut, 4400.0) - line (plain, 4400.0);
+            const double highCutLow = line (highCut, 220.0) - line (plain, 220.0), highCutHigh = line (highCut, 4400.0) - line (plain, 4400.0);
+            const double tiltLow = line (tilted, 220.0) - line (plain, 220.0), tiltHigh = line (tilted, 4400.0) - line (plain, 4400.0);
+            check (lowCutLow < -20.0 && std::abs (lowCutHigh) < 1.5,
+                   fmt ("Low Cut 2 kHz: the note's 220 Hz is %+.1f dB, its 4.4 kHz %+.1f dB", lowCutLow, lowCutHigh));
+            check (highCutHigh < -20.0 && std::abs (highCutLow) < 1.5,
+                   fmt ("High Cut 500 Hz: the note's 4.4 kHz is %+.1f dB, its 220 Hz %+.1f dB", highCutHigh, highCutLow));
+            check (tiltHigh - tiltLow > 7.0 && tiltHigh > 3.0 && tiltLow < -1.5,
+                   fmt ("Tilt +6 dB: 220 Hz %+.1f dB, 4.4 kHz %+.1f dB", tiltLow, tiltHigh));
+        }
+
+        {
+            // Drive on the worst case for a clipper: a loud, pure, high note (C6, 2093 Hz). Without
+            // oversampling its 21st and 23rd harmonics fold back to 4047 Hz and 139 Hz, notes that are
+            // not in the sound. Output Gain is down so the limiter stays out of it.
+            const double f0 = noteHz (96);
+            std::vector<float> sine (144000);
+            for (size_t i = 0; i < sine.size(); ++i)
+                sine[i] = 0.9f * (float) std::sin (juce::MathConstants<double>::twoPi * f0 * (double) i / 48000.0);
+
+            auto run = [&] (float driveDb)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::outGain, -12.0f);
+                h.set (ParamID::drive, driveDb);
+                return slice (play (h, sine, { keyDown (24000, 96) }), 100000, 32768);
+            };
+            auto folds = [f0] (const std::vector<float>& part)
+            {
+                const double fundamental = lineLevelDb (part, 48000.0, f0);
+                return std::max (lineLevelDb (part, 48000.0, 48000.0 - 21.0 * f0), lineLevelDb (part, 48000.0, 23.0 * f0 - 48000.0)) - fundamental;
+            };
+            const auto clean = run (0.0f), driven = run (24.0f), barely = run (0.1f);
+            const double third = lineLevelDb (driven, 48000.0, 3.0 * f0) - lineLevelDb (driven, 48000.0, f0);
+            const double step = rmsDb (barely, 0, barely.size()) - rmsDb (clean, 0, clean.size());
+            Harness latency (48000.0, 256);
+            check (folds (driven) < -60.0 && third > -20.0,
+                   fmt ("Drive 24 dB on a loud C6 sine: folded-back lines %.1f dB under the note (%.1f dB with Drive off); its 3rd harmonic is at %+.1f dB",
+                        folds (driven), folds (clean), third));
+            check (std::abs (step) < 0.2 && latency.proc.getLatencySamples() == 0,
+                   fmt ("Drive 0.1 dB is %+.3f dB from Drive off (no jump on leaving 0), and no latency is reported (%d samples)",
+                        step, latency.proc.getLatencySamples()));
+        }
+
+        {
+            // Hollow: the even harmonics of the played note go, the odd ones grow by 3 dB, with Pitch
+            // Lock on or off. The source is the key's own note (A3, 440 Hz) with four harmonics.
+            const auto source = harmonicInput (144000, 440.0, 4, 0.05);
+            auto run = [&] (float hollow, bool lock)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::pitchLock, lock ? 1.0f : 0.0f);
+                h.set (ParamID::hollow, hollow);
+                return slice (play (h, source, { keyDown (24000, 69) }), 100000, 32768);
+            };
+            for (const bool lock : { false, true })
+            {
+                const auto plain = run (0.0f, lock), hollow = run (100.0f, lock);
+                auto change = [&] (int k) { return lineLevelDb (hollow, 48000.0, 440.0 * k) - lineLevelDb (plain, 48000.0, 440.0 * k); };
+                check (std::abs (change (1) - 3.0) < 1.0 && std::abs (change (3) - 3.0) < 1.0 && change (2) < -20.0 && change (4) < -20.0,
+                       fmt ("Hollow 100%%, Pitch Lock %s: harmonics 1 to 4 change by %+.1f, %+.1f, %+.1f, %+.1f dB",
+                            lock ? "on" : "off", change (1), change (2), change (3), change (4)));
+            }
+        }
+
+        {
+            // Diffuse: the level and the harmonics of a held note stay where they were; left and right
+            // stop being the same; and when the note is over, the smear dies away and the dry signal
+            // is untouched again.
+            const auto source = harmonicInput (144000, 220.0, 8, 0.03);
+            auto run = [&] (float diffuse, std::vector<float>& right)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::diffuse, diffuse);
+                return play (h, source, { keyDown (24000, 57) }, -1.0, 120.0, &right);
+            };
+            std::vector<float> plainRight, smearedRight;
+            const auto plain = run (0.0f, plainRight), smeared = run (100.0f, smearedRight);
+            const double level = rmsDb (smeared, 96000, 140000) - rmsDb (plain, 96000, 140000);
+            double worst = 0.0;
+            for (int k = 1; k <= 8; ++k)
+                worst = std::max (worst, std::abs (lineLevelDb (slice (smeared, 100000, 32768), 48000.0, 220.0 * k)
+                                                   - lineLevelDb (slice (plain, 100000, 32768), 48000.0, 220.0 * k)));
+            const double alike = correlation (smeared, smearedRight, 96000, 140000);
+            check (std::abs (level) < 0.7 && worst < 3.0 && alike < 0.9 && correlation (plain, plainRight, 96000, 140000) > 0.999,
+                   fmt ("Diffuse 100%% on a held note: level %+.2f dB, its first eight harmonics within %.1f dB, left and right %.2f alike (1.00 without)",
+                        level, worst, alike));
+
+            const auto noise = noiseInput (144000, 62, 0.25f);
+            Harness h (48000.0, 256);
+            h.set (ParamID::diffuse, 100.0f);
+            h.set (ParamID::release, 30.0f);
+            const auto out = play (h, noise, { keyDown (24000, 60), keyUp (48000, 60) });
+            check (largestDifference (out, noise, 30000, 46000) > 0.02f && juce::exactlyEqual (largestDifference (out, noise, 100000, out.size()), 0.0f),
+                   fmt ("Diffuse 100%%, Dry When Idle: a second after the note the output is the input again, exactly (max difference %g)",
+                        (double) largestDifference (out, noise, 100000, out.size())));
+        }
+    }
+
+    void testStereo()
+    {
+        section ("0.3 G15: Spread places notes, Width opens a note up without changing its mono sum, Drift wanders");
+
+        auto frozenOnly = [] (Harness& h)
+        {
+            h.set (ParamID::captureMode, (float) (int) CaptureMode::hold);
+            h.set (ParamID::dryWhenIdle, 0.0f);
+        };
+        const auto noise = noiseInput (144000, 63, 0.2f);
+
+        {
+            // Spread 100%, Alternate: the first note is hard left (3 dB up there, nothing on the right),
+            // the second hard right.
+            auto run = [&] (float spread, std::vector<float>& right, bool second)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::release, 30.0f);
+                h.set (ParamID::spread, spread);
+                std::vector<ScriptEvent> events { keyDown (24000, 57) };
+                if (second)
+                {
+                    events.push_back (keyUp (48000, 57));
+                    events.push_back (keyDown (60000, 57));
+                }
+                return play (h, noise, events, -1.0, 120.0, &right);
+            };
+            std::vector<float> centreRight, firstRight, secondRight;
+            const auto centre = run (0.0f, centreRight, false), first = run (100.0f, firstRight, false), second = run (100.0f, secondRight, true);
+            const double lift = rmsDb (first, 60000, 100000) - rmsDb (centre, 60000, 100000);
+            check (std::abs (lift - 3.01) < 0.1 && juce::exactlyEqual (largestSample (firstRight, 0, firstRight.size()), 0.0f)
+                       && juce::exactlyEqual (largestSample (second, 80000, 120000), 0.0f) && largestSample (secondRight, 80000, 120000) > 0.01f,
+                   fmt ("Spread 100%%: the first note is hard left (%+.2f dB there, right channel peak %g); the next one is hard right (left channel peak %g)",
+                        lift, (double) largestSample (firstRight, 0, firstRight.size()), (double) largestSample (second, 80000, 120000)));
+        }
+
+        {
+            // Width on a rich note at the key's own pitch.
+            const auto source = harmonicInput (144000, 220.0, 8, 0.03);
+            auto run = [&] (float width, bool lock, std::vector<float>& right)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::pitchLock, lock ? 1.0f : 0.0f);
+                h.set (ParamID::width, width);
+                return play (h, source, { keyDown (24000, 57) }, -1.0, 120.0, &right);
+            };
+            for (const bool lock : { true, false })
+            {
+                std::vector<float> narrowRight, wideRight;
+                const auto narrow = run (0.0f, lock, narrowRight), wide = run (100.0f, lock, wideRight);
+                float monoDifference = 0.0f;
+                for (size_t i = 0; i < wide.size(); ++i)
+                    monoDifference = std::max (monoDifference, std::abs ((wide[i] + wideRight[i]) - (narrow[i] + narrowRight[i])));
+                const double balance = rmsDb (wide, 60000, 140000) - rmsDb (wideRight, 60000, 140000);
+                const double alike = correlation (wide, wideRight, 60000, 140000);
+                check (monoDifference < 1.0e-4f && std::abs (balance) < 0.3 && alike < 0.9,
+                       fmt ("Width 100%%, Pitch Lock %s: left + right is what it was (max difference %g), left and right are %+.2f dB apart and %.2f alike",
+                            lock ? "on" : "off", (double) monoDifference, balance, alike));
+            }
+        }
+
+        {
+            // Drift: the note wanders, but stays the note.
+            auto run = [&] (float drift, std::vector<float>& right)
+            {
+                Harness h (48000.0, 256);
+                frozenOnly (h);
+                h.set (ParamID::drift, drift);
+                return play (h, noise, { keyDown (24000, 57) }, -1.0, 120.0, &right);
+            };
+            std::vector<float> stillRight, driftRight;
+            const auto still = run (0.0f, stillRight), drifting = run (100.0f, driftRight);
+            const double pitch = centsBetween (pitchAt (drifting, 100000), noteHz (57));
+            const double sides = rmsDb (drifting, 60000, 140000) - rmsDb (driftRight, 60000, 140000);
+            check (largestDifference (still, drifting, 60000, 140000) > 0.01f && std::abs (pitch) <= 15.0 && std::abs (sides) < 6.0
+                       && ! juce::exactlyEqual (largestDifference (drifting, driftRight, 60000, 140000), 0.0f),
+                   fmt ("Drift 100%%: the sound moves (%.2f from the still one), %+.1f cents from the note, left and right %+.1f dB apart",
+                        (double) largestDifference (still, drifting, 60000, 140000), pitch, sides));
+        }
+    }
+
+    void testCpu()
+    {
+        section ("CPU: the heaviest patch, as a multiple of real time (a figure to watch, not a promise about any one computer)");
+
+        // 96 kHz, 64-sample blocks, eight low notes at Grain 16 in Live with a 5 ms Refresh, every
+        // LFO per voice, and everything stage 3 to 5 added switched on.
+        const double rate = 96000.0;
+        const int blockSize = 64;
+        auto seconds = [&] ()
+        {
+            Harness h (rate, blockSize);
+            h.set (ParamID::grainCycles, 16.0f);
+            h.set (ParamID::refresh, 5.0f);
+            for (const auto& ids : ParamID::lfo)
+            {
+                h.set (ids.on, 1.0f);
+                h.set (ids.trig, (float) (int) LfoTrig::voice);
+                h.set (ids.depth, 60.0f);
+            }
+            h.set (ParamID::feedback, 50.0f);
+            h.set (ParamID::threshold, -60.0f);
+            h.set (ParamID::lowCut, 80.0f);
+            h.set (ParamID::highCut, 9000.0f);
+            h.set (ParamID::tilt, 3.0f);
+            h.set (ParamID::drive, 12.0f);
+            h.set (ParamID::hollow, 50.0f);
+            h.set (ParamID::diffuse, 60.0f);
+            h.set (ParamID::spread, 70.0f);
+            h.set (ParamID::width, 60.0f);
+            h.set (ParamID::drift, 50.0f);
+
+            std::vector<MidiEvent> events;
+            for (int k = 0; k < 8; ++k)
+                events.push_back (noteOnAt (4800 + k * 64, 36 + (k * 5) % 13, 100));
+
+            juce::Random rng (77);
+            const double start = juce::Time::getMillisecondCounterHiRes();
+            h.run ((juce::int64) (4.0 * rate), events, 0.25f, nullptr, nullptr, rng);
+            return (juce::Time::getMillisecondCounterHiRes() - start) / 1000.0;
+        };
+
+        double best = 1.0e9;
+        for (int attempt = 0; attempt < 3; ++attempt)
+            best = std::min (best, seconds());
+        const double timesRealTime = 4.0 / std::max (1.0e-6, best);
+        check (timesRealTime > 1.0, fmt ("eight voices, Grain 16, everything on, 96 kHz: %.1f x real time on this machine (4 s of audio in %.2f s)", timesRealTime, best));
+    }
+
+    //==========================================================================
     // Reference sounds
 
     void compareWithTable (const char* name, const std::vector<float>& now, const float* table, int count)
@@ -3410,6 +3690,15 @@ int main (int argc, char** argv)
     {
         testWaitAndAtKey();
         testWaitingVoiceRules();
+    }
+    if (wants ("v03f"))
+    {
+        testTone();
+        testStereo();
+    }
+    if (wants ("cpu"))
+    {
+        testCpu();
     }
     if (wants ("v03e"))
     {
