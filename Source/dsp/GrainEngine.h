@@ -37,6 +37,10 @@ namespace grainlock
             int sync = 0;
             LfoShape shape = LfoShape::sine;
             float depthPercent = 50.0f;
+            LfoTrig trig = LfoTrig::free;
+            float fadeMs = 0.0f;
+            float phaseDegrees = 0.0f;
+            bool invert = false;
         };
         std::array<LfoParams, numLfos> lfos {};
 
@@ -47,6 +51,27 @@ namespace grainlock
 
         bool formantTrack = false;   // each voice's formant follows its own pitch (root C3)
         bool autoGain = true;        // a loop stays as loud as the slice it came from
+
+        // Note envelope and tape stop
+        float envAttackMs = 0.0f;
+        float envDecayMs = 300.0f;
+        float envPitch = 0.0f;       // semitones at the envelope's peak
+        float envFormant = 0.0f;     // semitones
+        int envGrain = 0;            // cycles
+        bool tapeStop = false;
+
+        // Keyboard
+        int bendUp = 2, bendDown = 2;    // semitones
+        float vibRateHz = 5.5f;
+        float vibDepthCents = 50.0f;
+
+        /** One keyboard source (index = ModSource): what it moves and how far. */
+        struct SourceParams
+        {
+            ModDest dest = ModDest::off;
+            float amountPercent = 100.0f;
+        };
+        std::array<SourceParams, numModSources> sources { SourceParams { ModDest::vibrato, 100.0f }, SourceParams {}, SourceParams {} };
     };
 
     /** What the host said about tempo and position for this block. */
@@ -97,7 +122,11 @@ namespace grainlock
         void killAll() noexcept;
         int findFreeSlot() noexcept;
         float velocityLevel (int velocity) const noexcept;
-        bool anyNoteHeld() const noexcept;
+        /** Dry When Idle: a voice is held (by anything) and has made its grab. Release tails and
+            voices still waiting to grab do not count. */
+        bool anyVoiceEngaged() const noexcept;
+        void restartNoteLfos() noexcept;
+        void updateBendTarget() noexcept;
         void publishScope (const VoiceContext& ctx) noexcept;
 
         void stackRemove (int note) noexcept;
@@ -116,6 +145,13 @@ namespace grainlock
         // Smoothed continuous controls.
         juce::SmoothedValue<float> tuneSemis, bendSemis, formantSemis, smoothFraction;
         juce::SmoothedValue<float> mix, sustain, bypassFade, trackAmount;
+        juce::SmoothedValue<float> wheel, pressure, expression;     // keyboard sources, 0..1
+        float bendNorm = 0.0f;                                      // the pitch wheel, -1..1
+        double vibratoPhase = 0.0;
+        bool vibratoInUse = false;
+        ModSettings mods;
+        std::array<double, numLfos> lfoOffset {};
+        std::array<float, numLfos> lfoFadeStep { 1.0f, 1.0f, 1.0f };
         std::array<juce::SmoothedValue<float>, numLfos> lfoDepth;   // 0 when that LFO is off, so switching fades
         std::array<juce::SmoothedValue<float>, numLfos> lfoRate;
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outGain { 1.0f };

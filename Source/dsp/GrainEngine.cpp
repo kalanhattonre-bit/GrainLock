@@ -28,11 +28,13 @@ namespace grainlock
         outGain.reset (sampleRate, 0.02);
         bypassFade.reset (sampleRate, 0.02);
         trackAmount.reset (sampleRate, 0.03);
+        for (auto* s : { &wheel, &pressure, &expression })
+            s->reset (sampleRate, 0.025);   // takes the steps out of 7-bit controller values
 
         limiter.prepare (sampleRate);
         // Different seeds, so S&H on two LFOs never steps in lockstep.
         for (int i = 0; i < numLfos; ++i)
-            lfos[(size_t) i].reset (0x6a1f5eedull + 0x9e3779b9ull * (juce::uint64) (i + 1));
+            lfos[(size_t) i].reset (lfoSeed (i));
 
         lfoSmoothCoeff = (float) (1.0 - std::exp (-1.0 / (0.002 * sampleRate)));
         activityUp = (float) (1.0 / (0.002 * sampleRate));
@@ -55,7 +57,14 @@ namespace grainlock
         killAll();
         ring.clear();
         limiter.reset();
+
+        // Controllers go back to rest here and on "reset controllers" only, never when notes are cleared.
+        bendNorm = 0.0f;
         bendSemis.setCurrentAndTargetValue (0.0f);
+        wheel.setCurrentAndTargetValue (0.0f);
+        pressure.setCurrentAndTargetValue (0.0f);
+        expression.setCurrentAndTargetValue (1.0f);
+        vibratoPhase = 0.0;
         activity = 0.0f;
         limiterBlend = 0.0f;
         lfoSmoothed.fill (0.0f);
@@ -111,6 +120,30 @@ namespace grainlock
             trackAmount.setTargetValue (params.formantTrack ? 1.0f : 0.0f);
         }
 
+        updateBendTarget();   // a new Bend range reaches a wheel that is already held
+
+        // Note envelope, tape stop and keyboard sources, as every voice reads them.
+        auto perSample = [this] (float ms) { return ms > 0.0f ? juce::jmin (1.0f, (float) (1000.0 / ((double) ms * sampleRate))) : 1.0f; };
+        mods.envAttackStep = perSample (params.envAttackMs);
+        mods.envDecayStep = perSample (params.envDecayMs);
+        mods.envPitch = params.envPitch;
+        mods.envFormant = params.envFormant;
+        mods.envGrain = (float) params.envGrain;
+        mods.tapeStop = params.tapeStop;
+        mods.tapeStep = -tapeStopFallSemitones * perSample (params.releaseMs);
+        mods.vibratoDepthSemitones = params.vibDepthCents / 100.0f;
+        mods.pressureCoeff = (float) (1.0 - std::exp (-1.0 / (0.025 * sampleRate)));
+        mods.lfoSmoothCoeff = lfoSmoothCoeff;
+        mods.anySource = false;
+        vibratoInUse = false;
+        for (size_t s = 0; s < (size_t) numModSources; ++s)
+        {
+            mods.dest[s] = params.sources[s].dest;
+            mods.amount[s] = juce::jlimit (-1.0f, 1.0f, params.sources[s].amountPercent / 100.0f);
+            mods.anySource = mods.anySource || mods.dest[s] != ModDest::off;
+            vibratoInUse = vibratoInUse || mods.dest[s] == ModDest::vibrato;
+        }
+
         offsetSamples = juce::jlimit (0, (int) (0.5 * sampleRate), (int) std::lround (params.offsetMs * sampleRate / 1000.0));
         refreshSamples = juce::jmax (1.0, (double) params.refreshMs * sampleRate / 1000.0);
         captureSource = CaptureSource { &ring, offsetSamples };
@@ -119,10 +152,18 @@ namespace grainlock
         for (auto& voice : voices)
             voice.setEnvelopeTimes (params.attackMs, params.decayMs, params.releaseMs);
 
-        // LFO: free-running in Hz, or locked to the host's tempo and song position.
+        // LFO: free-running in Hz, or at the host's tempo. Sync sets the SPEED in every trigger mode;
+        // only a Free LFO is also locked to the song position. In Note, Voice and Once the cycle
+        // starts at the note and is never pulled back to the bar line.
         for (int i = 0; i < numLfos; ++i)
         {
-            const double beats = lfoSyncBeats (params.lfos[(size_t) i].sync);
+            const auto& l = params.lfos[(size_t) i];
+            lfoOffset[(size_t) i] = (double) juce::jlimit (0.0f, 360.0f, l.phaseDegrees) / 360.0;
+            if (lfoOffset[(size_t) i] >= 1.0)
+                lfoOffset[(size_t) i] = 0.0;
+            lfoFadeStep[(size_t) i] = perSample (l.fadeMs);
+
+            const double beats = lfoSyncBeats (l.sync);
             lfoSynced[(size_t) i] = beats > 0.0;
             if (! lfoSynced[(size_t) i])
                 continue;
@@ -130,7 +171,7 @@ namespace grainlock
             const double bpm = timing.bpm > 0.0 ? timing.bpm : 120.0;
             lfoIncrement[(size_t) i] = bpm / 60.0 / beats / sampleRate;
 
-            if (timing.playing && timing.hasPpq)
+            if (timing.playing && timing.hasPpq && l.trig == LfoTrig::free)
             {
                 const double cycles = timing.ppq / beats;
                 const double whole = std::floor (cycles);
@@ -149,11 +190,23 @@ namespace grainlock
             return juce::jmax (lfoDepth[i].getCurrentValue(), wanted);   // counts a fade still in progress
         };
 
+        // What the note envelope and the keyboard sources can add on top (upward only: a negative
+        // amount never asks for more than the knob does).
+        float sourceFormantReach = 0.0f, sourceCyclesReach = 0.0f;
+        for (const auto& source : params.sources)
+        {
+            const float up = juce::jlimit (0.0f, 1.0f, source.amountPercent / 100.0f);
+            if (source.dest == ModDest::formant) sourceFormantReach += up * sourceFormantRangeSemitones;
+            if (source.dest == ModDest::grain)   sourceCyclesReach += up * sourceCyclesRange;
+        }
+
         const float formantNow = juce::jmax (formantSemis.getCurrentValue(), params.formantSemitones);
-        const float formantReach = formantNow + (hold ? 6.0f : 1.0f) + lfoFormantRangeSemitones * reachOf (LfoTarget::formant);
+        const float formantReach = formantNow + (hold ? 6.0f : 1.0f) + lfoFormantRangeSemitones * reachOf (LfoTarget::formant)
+                                   + juce::jmax (0.0f, params.envFormant) + sourceFormantReach;
         captureRatioMax = juce::jlimit (0.25f, 4.0f, std::exp2 (formantReach / 12.0f));
 
-        const int cyclesReach = params.grainCycles + (int) std::ceil (lfoCyclesRange * reachOf (LfoTarget::grainCycles));
+        const int cyclesReach = params.grainCycles + (int) std::ceil (lfoCyclesRange * reachOf (LfoTarget::grainCycles))
+                                + juce::jmax (0, params.envGrain) + (int) std::ceil (sourceCyclesReach);
         captureCyclesMax = juce::jlimit (minCycles, maxCycles, hold ? juce::jmax (cyclesReach, 2 * params.grainCycles)
                                                                     : cyclesReach);
         captureBothLayouts = hold;
@@ -164,29 +217,63 @@ namespace grainlock
         VoiceContext ctx;
         ctx.sampleRate = sampleRate;
 
-        // All three LFOs run every sample; an LFO that is off just has its depth faded to zero.
+        // All three shared LFOs run every sample; an LFO that is off just has its depth faded to zero.
+        // A shared LFO with no fade-in is added to the sums below, as in 0.2. One that each voice runs
+        // itself (Voice, Once) or fades in per note (Fade) is left out of them and handed to the voices.
         for (size_t i = 0; i < (size_t) numLfos; ++i)
         {
+            const auto& l = block.lfos[i];
             const double increment = lfoSynced[i] ? lfoIncrement[i] : (double) lfoRate[i].getNextValue() / sampleRate;
-            const float scaled = lfos[i].next (increment, block.lfos[i].shape) * lfoDepth[i].getNextValue();
+            const float depth = lfoDepth[i].getNextValue() * (l.invert ? -1.0f : 1.0f);
+            const float scaled = lfos[i].next (increment, l.shape, lfoOffset[i]) * depth;
             lfoLastScaled[i] = scaled;
             lfoSmoothed[i] += lfoSmoothCoeff * (scaled - lfoSmoothed[i]);   // ~2 ms, takes the click off square and S&H
             if (! std::isfinite (lfoSmoothed[i]))
                 lfoSmoothed[i] = 0.0f;
+
+            auto& feed = ctx.lfo[i];
+            feed.perVoice = l.trig == LfoTrig::voice || l.trig == LfoTrig::once;
+            feed.once = l.trig == LfoTrig::once;
+            feed.inVoice = feed.perVoice || lfoFadeStep[i] < 1.0f;
+            feed.shape = l.shape;
+            feed.increment = increment;
+            feed.offset = lfoOffset[i];
+            feed.depth = depth;
+            feed.shared = i == (size_t) LfoTarget::grainCycles ? scaled : lfoSmoothed[i];
+            feed.fadeStep = lfoFadeStep[i];
         }
 
-        const float lfoPitch = lfoSmoothed[(size_t) LfoTarget::pitch] * lfoPitchRangeSemitones;
-        const float lfoFormant = lfoSmoothed[(size_t) LfoTarget::formant] * lfoFormantRangeSemitones;
-        const float lfoCycles = lfoLastScaled[(size_t) LfoTarget::grainCycles] * lfoCyclesRange;   // steps crossfade in the voice
+        auto sharedPart = [&ctx, this] (LfoTarget target, bool smoothed)
+        {
+            const auto i = (size_t) target;
+            return ctx.lfo[i].inVoice ? 0.0f : (smoothed ? lfoSmoothed[i] : lfoLastScaled[i]);
+        };
+        const float lfoPitch = sharedPart (LfoTarget::pitch, true) * lfoPitchRangeSemitones;
+        const float lfoFormant = sharedPart (LfoTarget::formant, true) * lfoFormantRangeSemitones;
+        const float lfoCycles = sharedPart (LfoTarget::grainCycles, false) * lfoCyclesRange;   // steps crossfade in the voice
+
+        // Keyboard sources, and the one vibrato wave every voice shares.
+        ctx.mods = mods;
+        ctx.wheel = wheel.getNextValue();
+        ctx.pressure = pressure.getNextValue();
+        ctx.expression = expression.getNextValue();
+        if (vibratoInUse)
+        {
+            vibratoPhase += (double) block.vibRateHz / sampleRate;
+            vibratoPhase -= std::floor (vibratoPhase);
+            ctx.vibrato = (float) std::sin (juce::MathConstants<double>::twoPi * vibratoPhase);
+        }
 
         ctx.globalSemitones = tuneSemis.getNextValue() + bendSemis.getNextValue() + lfoPitch;
-        ctx.formantRatio = juce::jlimit (0.25f, 4.0f, std::exp2 ((formantSemis.getNextValue() + lfoFormant) / 12.0f));
+        ctx.formantSemitones = formantSemis.getNextValue() + lfoFormant;
+        ctx.formantRatio = juce::jlimit (0.25f, 4.0f, std::exp2 (ctx.formantSemitones / 12.0f));
+        ctx.cyclesBase = (float) block.grainCycles + lfoCycles;
         ctx.trackAmount = trackAmount.getNextValue();
         ctx.autoGain = block.autoGain;
         ctx.legacySeam = legacySeam;
         ctx.smooth = smoothFraction.getNextValue();
         ctx.sustain = sustain.getNextValue();
-        ctx.targetCycles = juce::jlimit (minCycles, maxCycles, juce::roundToInt ((float) block.grainCycles + lfoCycles));
+        ctx.targetCycles = juce::jlimit (minCycles, maxCycles, juce::roundToInt (ctx.cyclesBase));
         ctx.pitchLock = block.pitchLock;
         ctx.live = block.captureMode == CaptureMode::live;
         ctx.refreshSamples = refreshSamples;
@@ -241,7 +328,7 @@ namespace grainlock
 
             // Dry When Idle: full dry while no key is down; Mix applies while keys are held.
             const float m = mix.getNextValue();
-            if (anyNoteHeld())
+            if (anyVoiceEngaged())
                 activity = juce::jmin (1.0f, activity + activityUp);
             else if (activity > 0.0f)
                 activity = juce::jmax (0.0f, activity - activityDown);
@@ -342,14 +429,29 @@ namespace grainlock
 
     void GrainEngine::handleMidiEvent (const juce::uint8* data, int numBytes, const VoiceContext& ctx) noexcept
     {
-        if (data == nullptr || numBytes < 3)
+        if (data == nullptr || numBytes < 2)
             return;
 
         const int status = data[0] & 0xf0;
         const int d1 = data[1] & 0x7f;
+
+        if (status == 0xd0)   // channel pressure: the one two-byte message that matters here
+        {
+            pressure.setTargetValue ((float) d1 / 127.0f);
+            return;
+        }
+        if (numBytes < 3)
+            return;
+
         const int d2 = data[2] & 0x7f;
 
-        if (status == 0x90 && d2 > 0)
+        if (status == 0xa0)   // poly pressure: that key's voices only
+        {
+            for (auto& voice : voices)
+                if (voice.isActive() && voice.getNote() == d1)
+                    voice.setPressure ((float) d2 / 127.0f);
+        }
+        else if (status == 0x90 && d2 > 0)
         {
             if (monoMode) monoNoteOn (d1, d2, ctx);
             else          noteOn (d1, d2, ctx);
@@ -362,13 +464,23 @@ namespace grainlock
         else if (status == 0xe0)
         {
             const int value = d1 | (d2 << 7);
-            bendSemis.setTargetValue (2.0f * (float) (value - 8192) / 8192.0f);   // +/-2 semitones
+            bendNorm = (float) (value - 8192) / 8192.0f;
+            updateBendTarget();
         }
         else if (status == 0xb0)
         {
-            if (d1 == 120)      killAll();                          // all sound off
+            if (d1 == 1)        wheel.setTargetValue ((float) d2 / 127.0f);
+            else if (d1 == 11)  expression.setTargetValue ((float) d2 / 127.0f);
+            else if (d1 == 120) killAll();                          // all sound off
             else if (d1 == 123) releaseAll();                       // all notes off
-            else if (d1 == 121) bendSemis.setTargetValue (0.0f);    // reset controllers
+            else if (d1 == 121)                                     // reset controllers
+            {
+                bendNorm = 0.0f;
+                updateBendTarget();
+                wheel.setTargetValue (0.0f);
+                pressure.setTargetValue (0.0f);
+                expression.setTargetValue (1.0f);
+            }
         }
     }
 
@@ -420,6 +532,7 @@ namespace grainlock
 
         const int slot = findFreeSlot();
         voices[(size_t) slot].start (note, velocityLevel (velocity), ++voiceCounter, ctx, captureSource);
+        restartNoteLfos();
         lastStartedVoice = slot;
     }
 
@@ -450,6 +563,7 @@ namespace grainlock
             voices[(size_t) monoVoice].start (note, level, ++voiceCounter, ctx, captureSource);
         }
 
+        restartNoteLfos();   // in mono every key restarts a Note LFO, legato or not
         lastStartedVoice = monoVoice;
     }
 
@@ -490,15 +604,24 @@ namespace grainlock
         monoVoice = -1;
     }
 
-    bool GrainEngine::anyNoteHeld() const noexcept
+    bool GrainEngine::anyVoiceEngaged() const noexcept
     {
-        if (monoMode)
-            return stackSize > 0;
-
         for (const auto& voice : voices)
-            if (voice.isHeld())
+            if (voice.isEngaged())
                 return true;
         return false;
+    }
+
+    void GrainEngine::restartNoteLfos() noexcept
+    {
+        for (size_t i = 0; i < (size_t) numLfos; ++i)
+            if (block.lfos[i].trig == LfoTrig::note)
+                lfos[i].restart();
+    }
+
+    void GrainEngine::updateBendTarget() noexcept
+    {
+        bendSemis.setTargetValue (bendNorm * (float) (bendNorm >= 0.0f ? block.bendUp : block.bendDown));
     }
 
     void GrainEngine::stackRemove (int note) noexcept

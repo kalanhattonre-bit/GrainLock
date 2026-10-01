@@ -6,36 +6,73 @@
 
 namespace grainlock
 {
-    /** The single global LFO. Output is bipolar, -1..1.
+    /** The seed of LFO number index, the same in the engine and in every voice. Different per LFO, so
+        S&H on two LFOs never steps in lockstep. */
+    inline juce::uint64 lfoSeed (int index) noexcept
+    {
+        return 0x6a1f5eedull + 0x9e3779b9ull * (juce::uint64) (index + 1);
+    }
 
-        The sample-and-hold value is a hash of the cycle number, so re-locking to the host
-        at a block boundary can never draw a second value for the same cycle. */
+    /** One low-frequency oscillator. Output is bipolar, -1..1.
+
+        The engine runs three of these for every note together; a voice runs its own three when an
+        LFO is set to restart per voice. Both use the same seed, so every key hears the same
+        sample-and-hold sequence.
+
+        The sample-and-hold value is a hash of the cycle number, so re-locking to the host at a
+        block boundary can never draw a second value for the same cycle, and a restart replays the
+        sequence from its first value. */
     class Lfo
     {
     public:
         void reset (juce::uint64 newSeed) noexcept
         {
             seed = newSeed;
-            phase = 0.0;
-            cycle = 0;
-            held = valueForCycle (cycle);
+            restart();
         }
 
-        /** Returns the value at the current phase, then advances by increment (cycles per sample). */
-        float next (double increment, LfoShape shape) noexcept
+        /** Back to the start of the first cycle (a note-on in the Note, Voice and Once modes). */
+        void restart() noexcept
+        {
+            phase = 0.0;
+            cycle = 0;
+            finished = false;
+            held = valueForCycle (0);
+            nextHeld = valueForCycle (1);
+        }
+
+        /** The value at the current phase, without advancing. */
+        float peek (LfoShape shape, double offset = 0.0) const noexcept { return valueAt (shape, offset); }
+
+        /** Returns the value at the current phase, then advances by increment (cycles per sample).
+            offset (0..1) shifts where in the cycle the shape is read; it does not move the
+            sample-and-hold steps. once: stop at the end of the first cycle and hold that value. */
+        float next (double increment, LfoShape shape, double offset = 0.0, bool once = false) noexcept
         {
             if (! std::isfinite (phase))
                 phase = 0.0;
 
-            const float value = valueAt (phase, shape);
+            const float value = valueAt (shape, offset);
+
+            if (once && finished)
+                return value;
 
             phase += std::isfinite (increment) ? increment : 0.0;
             if (phase >= 1.0)
             {
-                const double whole = std::floor (phase);
-                phase -= whole;
-                cycle += (juce::int64) whole;
-                held = valueForCycle (cycle);
+                if (once)
+                {
+                    phase = 1.0 - 1.0e-9;   // the last point of the cycle, held from here on
+                    finished = true;
+                }
+                else
+                {
+                    const double whole = std::floor (phase);
+                    phase -= whole;
+                    cycle += (juce::int64) whole;
+                    held = valueForCycle (cycle);
+                    nextHeld = valueForCycle (cycle + 1);
+                }
             }
             return value;
         }
@@ -54,22 +91,38 @@ namespace grainlock
                 return;
 
             phase = fraction;
+            finished = false;
             if (cycleIndex != cycle)
             {
                 cycle = cycleIndex;
                 held = valueForCycle (cycle);
+                nextHeld = valueForCycle (cycle + 1);
             }
         }
 
     private:
-        float valueAt (double p, LfoShape shape) const noexcept
+        float valueAt (LfoShape shape, double offset) const noexcept
         {
+            double p = phase;
+            if (! juce::exactlyEqual (offset, 0.0))   // exactly the old read when there is no offset
+            {
+                p += offset;
+                p -= std::floor (p);
+            }
+
             switch (shape)
             {
                 case LfoShape::sine:       return (float) std::sin (juce::MathConstants<double>::twoPi * p);
                 case LfoShape::triangle:   return (float) (p < 0.25 ? 4.0 * p : (p < 0.75 ? 2.0 - 4.0 * p : 4.0 * p - 4.0));
                 case LfoShape::square:     return p < 0.5 ? 1.0f : -1.0f;
                 case LfoShape::sampleHold: return held;
+                case LfoShape::saw:        return (float) (1.0 - 2.0 * p);   // falls; Invert makes it rise
+                case LfoShape::random:
+                {
+                    // A smooth walk from this cycle's random value to the next one's.
+                    const double t = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * juce::jlimit (0.0, 1.0, phase));
+                    return held + (float) t * (nextHeld - held);
+                }
             }
             return 0.0f;
         }
@@ -87,6 +140,7 @@ namespace grainlock
         juce::uint64 seed = 0;
         double phase = 0.0;
         juce::int64 cycle = 0;
-        float held = 0.0f;
+        float held = 0.0f, nextHeld = 0.0f;
+        bool finished = false;
     };
 }
