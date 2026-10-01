@@ -74,17 +74,17 @@ fine steps, and double-click to reset.
 | Grain | How many wavelengths of the note each loop holds. More cycles give a smoother, purer tone. |
 | Smooth | How long the crossfade is where the loop wraps around. More means softer; zero means buzzy. |
 | Lock (Pitch Lock) | On: the note's pitch is always exact. Off: the loop really is Grain wavelengths long, which is grittier and can sound lower than the note. |
-| Offset | Grabs sound from this far back in time, so a key pressed late can still catch a hit that just happened. **Offset Sync** sets it as a note value at Cubase's tempo instead. It reaches back 1.2 seconds at most: a longer note value is halved, more than once if needed, until it fits (at 120 bpm, 1/1 becomes 1/2). |
+| Offset | Grabs sound from this far back in time, so a key pressed late can still catch a hit that just happened. **Offset Sync** sets it as a note value at Cubase's tempo instead. A synced Offset reaches back 1.2 seconds at most: a longer note value is halved, more than once if needed, until it fits (at 120 bpm, 1/1 becomes 1/2). |
 | Refresh | LIVE only: how often the loop grabs fresh sound. **Refresh Sync** makes it a note value. |
 | On Grid | LIVE with Refresh Sync, while the song is playing: re-grabs land on the song's own beat lines instead of counting from when you pressed the key. With the song stopped it changes nothing. |
 | Skip | LIVE: the chance that a re-grab is left out, so the note keeps what it had a little longer. |
 | Feedback Amount | Puts the frozen sound back into what gets grabbed next, so a LIVE note keeps ringing and changing after the source has moved on. It always dies away by itself. Leave Auto Gain on with it. |
 | Grab | **Before Key** grabs the sound just before you pressed. **At Key** waits and grabs the sound that starts when you press. |
-| Wait | Waits this long after the key before grabbing. (A short tap still plays for as long as you held it, just later.) **Wait Sync** makes it a note value, 2 seconds at most: a longer one is halved until it fits (below 120 bpm, 1/1 becomes 1/2). |
+| Wait | Waits this long after the key before grabbing. (A short tap still plays for as long as you held it, just later.) **Wait Sync** makes it a note value, 2 seconds at most: a longer one is halved, more than once if needed, until it fits (at 100 bpm, 1/1 becomes 1/2). |
 | Snap | Looks for the nearest hit (a drum, a consonant) within this many ms of the key and starts the loop exactly on it. With no hit nearby, the note simply starts that much later. |
 | Thresh (Threshold) | A key pressed while the input is quieter than this waits for sound instead of freezing silence. In LIVE, the note keeps its last good grab while the input is quiet. |
-| Max Wait | The longest a key waits for sound before it grabs whatever is there. |
-| Skip Hiss | LIVE: a held note never re-grabs breath or "sss" sounds. With the Threshold on as well, a key pressed on one waits for a sung sound (for as long as Max Wait allows). |
+| Max Wait | The longest a key waits for sound before it grabs whatever is there. A short tap that you have already let go by then plays nothing (in Latch or Fixed, or with the sustain pedal down, it still plays). |
+| Skip Hiss | LIVE: a held note never re-grabs breath or "sss" sounds. With the Threshold on as well, a key pressed on one waits for a sung sound (for as long as Max Wait allows; a hit that Snap finds is still taken as it is). |
 | Gate | The frozen sound is heard only while the input is above the Threshold. |
 
 ### PLAY page: the note itself
@@ -127,7 +127,7 @@ one. Its light glows while it is on, and a white dot rides the Fine, Formant and
 | Control | What it does |
 | --- | --- |
 | Bend Up / Down | How far the pitch wheel bends, in semitones. |
-| Mod Wheel, Aftertouch, Expression | What each one moves (vibrato, Formant, Grain or level) and by how much. **Expression** is an expression pedal (MIDI controller 11): fully down is its resting place and does nothing; easing it back brings its target in. **Level** with a positive Amount turns the note down as you push the wheel or press harder (silent at 100%), and makes the pedal work like a volume pedal. With a negative Amount it is the other way round: the note is quiet until you push the wheel or press, a swell. (On Expression, a negative Amount is silent while the pedal is fully down, and also when no pedal is connected.) |
+| Mod Wheel, Aftertouch, Expression | What each one moves (vibrato, Formant, Grain or level) and by how much. **Expression** is an expression pedal (MIDI controller 11): fully down is its resting place and does nothing; easing it back brings its target in. **Level** with a positive Amount turns the note down as you push the wheel or press harder (silent at 100%), and makes the pedal work like a volume pedal. With a negative Amount it is the other way round: the note is quiet until you push the wheel or press, a swell. (On Expression, a negative Amount turns the note down while the pedal is fully down, and also when no pedal is connected: silent at -100%. Easing the pedal back brings the note up.) |
 | Key Up: Mode | **Normal**: a note ends when you let go. **Latch**: a chord stays until you play the next one (to stop it, switch back to Normal or stop the song). **To Grid**: letting go takes effect on the next Length line of the song (with the song stopped it works like Normal). **Fixed**: every note lasts exactly one Length. |
 | Length | The note value used by To Grid and Fixed. |
 | Sus Pedal | On: the sustain pedal holds notes (in Normal and To Grid). |
@@ -179,8 +179,9 @@ Three things are deliberately different from 0.2:
 - **The loop seam is a little cleaner.** Where the seam fade is very short (Smooth near zero, or
   notes from about an octave above middle C upward at the default Smooth), a note may now freeze a
   moment up to 10 ms earlier, so the loop joins without a tick. On a steady pitched sound such a
-  note can come out a little louder or quieter than it did (about 2 dB at most in the tests, mainly
-  with Hold presets such as Stutter Gate and Glitch Drums).
+  note can come out a little louder or quieter than it did (in the tests about 2 dB over a whole
+  note, and about 6 dB for the first 20 ms of one; mainly with Hold presets such as Stutter Gate and
+  Glitch Drums).
 - **Which note gives way.** When more than 8 notes overlap, the note that gives way is now one that
   is already fading out if there is one, not simply the oldest, so a long held note is no longer cut
   off by short notes played over it.

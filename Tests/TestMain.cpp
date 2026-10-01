@@ -1606,11 +1606,16 @@ namespace
             h.set (ParamID::pitchLfoDepth, 100.0f);
             h.set (ParamID::pitchLfoTrig, (float) (int) LfoTrig::once);
             const auto noise = noiseInput (42000, 7, 0.25f);
-            const std::vector<float> head (noise.begin(), noise.begin() + 35600), tail (noise.begin() + 35600, noise.end());
-            ScopeFrame atRest, later, laterStill;
-            play (h, std::vector<float> (noise.begin(), noise.begin() + 4800), {});
+            const std::vector<float> lead (noise.begin(), noise.begin() + 4800), head (noise.begin(), noise.begin() + 28000),
+                                     middle (noise.begin() + 28000, noise.begin() + 35600), tail (noise.begin() + 35600, noise.end());
+            // The queue to the display holds seven frames and drops what comes after: it is emptied
+            // before each stretch that is read.
+            ScopeFrame atRest, later, laterStill, old;
+            play (h, lead, {});
             const bool a = h.proc.getScopeFifo().pullLatest (atRest);
-            play (h, head, { keyDown (4800, 69) });   // ends 30800 samples after the key: two and a half cycles
+            play (h, head, { keyDown (4800, 69) });
+            h.proc.getScopeFifo().pullLatest (old);
+            play (h, middle, {});                     // ends 30800 samples after the key: two and a half cycles
             const bool b = h.proc.getScopeFifo().pullLatest (later);
             play (h, tail, {});                       // 6400 more: half a cycle and a bit on a free-running wave
             const bool c = h.proc.getScopeFifo().pullLatest (laterStill);
@@ -2451,15 +2456,21 @@ namespace
         {
             // What the display is told a waiting key is waiting for: its Wait first (whatever Threshold
             // is set to), then sound.
-            const std::vector<float> silence (36000, 0.0f);
+            const std::vector<float> longer (28000, 0.0f), shorter (8000, 0.0f);
             Harness h (48000.0, 256);
             h.set (ParamID::threshold, -45.0f);
             h.set (ParamID::maxWait, 2000.0f);
             h.set (ParamID::wait, 500.0f);
-            ScopeFrame duringWait, afterWait;
-            play (h, silence, { keyDown (24000, 60) });   // ends 250 ms into the 500 ms Wait
+            // (The queue to the display holds seven frames and drops what comes after: it is emptied
+            // before each stretch that is read.)
+            ScopeFrame duringWait, afterWait, old;
+            play (h, longer, { keyDown (24000, 60) });
+            h.proc.getScopeFifo().pullLatest (old);
+            play (h, shorter, {});                        // ends 250 ms into the 500 ms Wait
             const bool first = h.proc.getScopeFifo().pullLatest (duringWait);
-            play (h, silence, {});                        // ends 500 ms past it, still silent
+            play (h, longer, {});
+            h.proc.getScopeFifo().pullLatest (old);
+            play (h, shorter, {});                        // ends 500 ms past it, still silent
             const bool second = h.proc.getScopeFifo().pullLatest (afterWait);
             check (first && second && duringWait.isWaiting (60) && duringWait.waitingFor == 0
                        && afterWait.isWaiting (60) && afterWait.waitingFor == 2,
