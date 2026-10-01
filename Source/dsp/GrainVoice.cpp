@@ -642,7 +642,7 @@ namespace grainlock
         transition.length = juce::jmax (1, lengthSamples);
     }
 
-    void GrainVoice::beginRecapture (double soundingFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept
+    void GrainVoice::beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept
     {
         const int previous = current;
         const int next = 1 - current;
@@ -670,7 +670,7 @@ namespace grainlock
         pendingRecapture = false;
 
         // Fresh audio is unrelated to the old grain: equal-power, over one loop (1.5..50 ms).
-        const double loop = loopLengthSamples (fresh, soundingFrequency);
+        const double loop = loopLengthSamples (fresh, loopFrequency);
         startTransition ((int) juce::jlimit (0.0015 * sampleRate, 0.05 * sampleRate, loop), 0.0f);
     }
 

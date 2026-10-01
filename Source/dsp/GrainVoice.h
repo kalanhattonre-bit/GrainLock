@@ -214,7 +214,7 @@ namespace grainlock
                       bool nudge = true) noexcept;
         void renderState (const PlayState& state, const VoiceContext& ctx, float& left, float& right) const noexcept;
         bool advance (PlayState& state, double frequency) const noexcept;
-        void beginRecapture (double soundingFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept;
+        void beginRecapture (double loopFrequency, const VoiceContext& ctx, const CaptureSource& source) noexcept;
         void beginReshape (const VoiceContext& ctx) noexcept;
         bool beginExtend (int cycles, bool lockOn, const VoiceContext& ctx, const CaptureSource& source) noexcept;
         void startTransition (int lengthSamples, float correlation) noexcept;
