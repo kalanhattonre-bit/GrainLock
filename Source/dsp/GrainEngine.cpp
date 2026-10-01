@@ -96,6 +96,8 @@ namespace grainlock
 
     void GrainEngine::applyBlockParams (const EngineParams& params, const HostTiming& timing, int) noexcept
     {
+        const bool starting = firstBlock;
+
         if (! firstBlock && params.mono != monoMode)
             releaseAll();   // switching mode lets sounding notes ring out instead of cutting them
 
@@ -105,6 +107,8 @@ namespace grainlock
         songPpq = timing.ppq;
         beatsPerSample = (timing.bpm >= 1.0 ? timing.bpm : 120.0) / 60.0 / sampleRate;
         holdLineBeats = holdTimeBeats (params.holdTime);
+        if (! songWasRunning && songRunning)
+            keysAtStop.fill (0);   // the song is running again: Latch takes no notice of key-ups, as usual
 
         const HoldMode previousHoldMode = block.holdMode;
         const bool pedalWasOn = block.sustainPedal;
@@ -118,6 +122,7 @@ namespace grainlock
             // and notes whose key is up are released (the pedal still holds them where it counts).
             if (params.holdMode != previousHoldMode)
             {
+                keysAtStop.fill (0);
                 for (auto& voice : voices)
                     voice.cancelHoldTimer();
                 if (! pedalHolds())
@@ -150,7 +155,10 @@ namespace grainlock
                 }
                 else if (params.holdMode == HoldMode::latch)
                 {
+                    // A host sends the key-ups of its track's notes because of the stop, so they can
+                    // arrive after it: the keys still down now end their notes when they come up.
                     releaseKeysUp (-1.0);
+                    keysAtStop = keysDown;
                 }
             }
 
@@ -215,6 +223,8 @@ namespace grainlock
             wanted.driveDb = params.driveDb;
             wanted.diffuse = params.diffusePercent / 100.0f;
             tone.setTargets (wanted);
+            if (starting)
+                tone.settle();   // nothing sounds yet: a stage that is on is fully in for the first note
         }
 
         // Feedback at exactly 0 (and done fading) is not in the path at all: the memory holds the
@@ -739,7 +749,9 @@ namespace grainlock
         // A line counts once, however the position got here (a locate, a position reported a hair
         // early and then again): two lines are never less than half a line of song apart. Counted in
         // beats, so a tempo change inside a line does not lose the next one.
-        if (gridBeatsSinceFire < 0.5 * gridBeats)
+        // (The count is a sum of thousands of small steps, so an exact half line can come out a hair
+        // under: two samples of slack. The repeats this is here for come a few samples after a line.)
+        if (gridBeatsSinceFire < 0.5 * gridBeats - 2.0 * gridPpqPerSample)
             return;
         gridBeatsSinceFire = 0.0;
 
@@ -989,6 +1001,7 @@ namespace grainlock
             const bool overlap = anyKeyDown();   // judged before this key counts as down
             const bool wasDown = keyIsDown (d1);
             setKey (d1, true);
+            keysAtStop[(size_t) (d1 >> 6)] &= ~((juce::uint64) 1 << (d1 & 63));
 
             if (block.holdMode == HoldMode::latch && ! monoMode)
             {
@@ -1024,8 +1037,13 @@ namespace grainlock
         {
             setKey (d1, false);
 
+            // A key that was down when the song stopped ends its note when it comes up, Latch or not.
+            const juce::uint64 keyBit = (juce::uint64) 1 << (d1 & 63);
+            const bool endsAtStop = (keysAtStop[(size_t) (d1 >> 6)] & keyBit) != 0;
+            keysAtStop[(size_t) (d1 >> 6)] &= ~keyBit;
+
             // Latch and Full take no notice of a key coming up; the pedal holds it in Normal and On Grid.
-            if (block.holdMode == HoldMode::latch || block.holdMode == HoldMode::full || pedalHolds())
+            if ((block.holdMode == HoldMode::latch && ! endsAtStop) || block.holdMode == HoldMode::full || pedalHolds())
                 return;
 
             const double deferBeats = block.holdMode == HoldMode::onGrid ? beatsToNextLine() : -1.0;
@@ -1239,10 +1257,9 @@ namespace grainlock
 
     void GrainEngine::monoNoteOn (int note, int velocity, const VoiceContext& ctx, bool overlap) noexcept
     {
-        // Latch and Full take no notice of keys coming up, so there the stack is just the newest key.
-        if (block.holdMode == HoldMode::latch || block.holdMode == HoldMode::full)
-            stackSize = 0;
-
+        // Latch and Full take no notice of keys coming up, so the stack can hold keys that are up.
+        // Nothing reads it in those modes; on the way out (releaseKeysUp) the keys that are up are
+        // taken off first, and the note falls back to the newest key still down.
         stackRemove (note);
         stackPush (note);
 
@@ -1392,6 +1409,7 @@ namespace grainlock
         stackSize = 0;
         monoVoice = -1;
         keysDown.fill (0);
+        keysAtStop.fill (0);
         pedalDown = false;
         lastNote = -1;
     }
@@ -1402,9 +1420,12 @@ namespace grainlock
             voice.kill();
         clearPendingGrabs();
         clearFeedback();
+        tone.reset();     // All Sound Off means now: nothing rings on in Diffuse
+        toneTail = 0;
         stackSize = 0;
         monoVoice = -1;
         keysDown.fill (0);
+        keysAtStop.fill (0);
         pedalDown = false;
         lastNote = -1;
     }

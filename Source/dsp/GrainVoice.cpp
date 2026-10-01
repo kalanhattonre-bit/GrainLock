@@ -48,6 +48,7 @@ namespace grainlock
         shapeMask = shapeLength - 1;
         shapeWrite = 0;
         shapeFade = (float) (0.003 * sampleRate);
+        placeStep = (float) (2.0 / (0.020 * sampleRate));   // one side to the other in 20 ms
         kill();
     }
 
@@ -204,16 +205,28 @@ namespace grainlock
                 }
             }
 
+            // A sounding voice slides to a new place (a mono note changing key, Spread Mode switched):
+            // a jump would click. A note that is starting is put straight on its spot. Spread's own
+            // smoothing and Drift are both slower than the slide, so they pass through as they are.
             const float wanted = juce::jlimit (-1.0f, 1.0f, ctx.spread * home + ctx.drift * wander);
-            if (! juce::exactlyEqual (wanted, place))
+            const float gap = wanted - place;
+            const float nextPlace = (! advance || std::abs (gap) <= placeStep) ? wanted
+                                                                               : place + (gap > 0.0f ? placeStep : -placeStep);
+            if (! juce::exactlyEqual (nextPlace, place))
             {
-                place = wanted;
+                place = nextPlace;
                 const float angle = (place + 1.0f) * 0.25f * juce::MathConstants<float>::pi;
                 placeLeft = 1.41421356f * std::cos (angle);
                 placeRight = 1.41421356f * std::sin (angle);
                 if (std::abs (placeLeft) < 1.0e-6f)  placeLeft = 0.0f;    // hard right: cos (pi / 2) is not quite 0 in floats
                 if (std::abs (placeRight) < 1.0e-6f) placeRight = 0.0f;
             }
+        }
+        else if (! juce::exactlyEqual (place, 0.0f))
+        {
+            // Back in the centre, which is where the voice is heard: a later slide starts from here.
+            place = 0.0f;
+            placeLeft = placeRight = 1.0f;
         }
 
         // Sounding pitch: only the loop rate follows it, so these move pitch and tone together.
@@ -895,7 +908,20 @@ namespace grainlock
         }
     }
 
-    void GrainVoice::applyShape (const VoiceContext& ctx, double frequency, float& left, float& right) noexcept
+    float GrainVoice::loopAhead (const PlayState& state, const VoiceContext& ctx) const noexcept
+    {
+        PlayState later = state;
+        later.theta += state.lockOn ? 0.25 : 0.25 / (double) juce::jmax (1, state.taps);
+        if (later.theta >= 1.0)
+            later.theta -= 1.0;   // a loop is a circle: after its end comes its start
+
+        float l = 0.0f, r = 0.0f;
+        renderState (later, ctx, l, r);
+        return l + r;
+    }
+
+    float GrainVoice::applyShape (const VoiceContext& ctx, double frequency, float& left, float& right,
+                                  float repeats, float ahead) noexcept
     {
         // Always kept, so the controls have real history to work from the moment they are turned up.
         const int at = shapeWrite;
@@ -907,7 +933,7 @@ namespace grainlock
 
         const float h = ctx.hollow, w = ctx.width;
         if (! (h > 0.0f || w > 0.0f))
-            return;
+            return 0.0f;
 
         // One note period in samples, as far as the line reaches (it holds notes down to about 8 Hz).
         const double period = juce::jlimit (2.0, (double) (shapeMask - 4) / 0.75, sampleRate / frequency);
@@ -936,20 +962,23 @@ namespace grainlock
             right = (right - hollow * r) * scale;
         }
 
-        // Width: the difference between the loop a quarter and three quarters of a period earlier,
-        // added to one side and taken from the other. Left plus right is exactly what it was. On a
-        // sound that repeats every note period (always, with Pitch Lock on) neither side gets louder
-        // than the other.
-        if (w > 0.0f)
-        {
-            float al = 0.0f, ar = 0.0f, bl = 0.0f, br = 0.0f;
-            const float trustA = earlier (0.25 * period, al, ar);
-            const float trustB = earlier (0.75 * period, bl, br);
-            const float side = 0.25f * ((bl + br) - (al + ar)) * (1.0f + hollow) * scale   // Hollow leaves this part of the sound that much stronger
-                               * juce::jmin (trustA, trustB);
-            left += w * side;
-            right -= w * side;
-        }
+        // Width: half the difference between the (hollowed) sound a quarter of a note period ahead and
+        // a quarter behind, added to one side and taken from the other. Left plus right is exactly
+        // what it was, and neither side gets louder than the other, because the two quarters sit
+        // evenly about now. The memory holds the sound before Hollow, a quarter (a) and three quarters
+        // (b) of a period back; three quarters back is a quarter ahead for the share of the sound
+        // that repeats every note period, and for the rest the loop has said what is ahead.
+        if (! (w > 0.0f))
+            return 0.0f;
+
+        float al = 0.0f, ar = 0.0f, bl = 0.0f, br = 0.0f;
+        float trust = earlier (0.25 * period, al, ar);
+        if (repeats > 0.0f || hollow > 0.0f)
+            trust = juce::jmin (trust, earlier (0.75 * period, bl, br));
+
+        const float a = al + ar, b = bl + br;
+        const float later = ahead + repeats * b;
+        return w * 0.25f * scale * (later - (1.0f + hollow) * a + hollow * b) * trust;
     }
 
     bool GrainVoice::advance (PlayState& state, double frequency) const noexcept
@@ -1224,8 +1253,16 @@ namespace grainlock
             }
         }
 
+        // Width needs the sound a quarter of a note period from now. With Pitch Lock on the loop repeats
+        // every note period, so the voice's own memory has it. With Pitch Lock off it does not, and
+        // the loop itself is asked (one read more; with Pitch Lock on it would be one per cycle).
+        // Each play state gives its own share, so a Pitch Lock switch fades the side with the sound.
+        const bool widthOn = ctx.width > 0.0f;
+
         float left = 0.0f, right = 0.0f;
         float sendLeft = 0.0f, sendRight = 0.0f;
+        float ahead = 0.0f;     // the part that does not repeat every note period, a quarter period ahead
+        float repeats = 1.0f;   // the share of the sound that does repeat
         {
             auto& now = states[(size_t) current];
             now.gain += gainSlew * (now.gainTarget - now.gain);
@@ -1237,6 +1274,12 @@ namespace grainlock
                 sendLeft = left * scale;
                 sendRight = right * scale;
             }
+
+            if (widthOn && ! now.lockOn)
+            {
+                ahead = loopAhead (now, ctx);
+                repeats = 0.0f;
+            }
         }
 
         if (transition.active)
@@ -1246,6 +1289,8 @@ namespace grainlock
             fading.gain += gainSlew * (fading.gainTarget - fading.gain);
             renderState (fading, ctx, oldLeft, oldRight);
             const float oldScale = ctx.feedbackOn ? sendScale (fading) : 1.0f;
+            const float oldAhead = (widthOn && ! fading.lockOn) ? loopAhead (fading, ctx) : 0.0f;   // before it moves on
+            const bool oldRepeats = fading.lockOn;
             advance (fading, frequency);
 
             // sin/cos fade scaled so the summed power stays flat for the expected correlation:
@@ -1259,13 +1304,16 @@ namespace grainlock
             right = gainIn * right + gainOut * oldRight;
             sendLeft = gainIn * sendLeft + gainOut * oldLeft * oldScale;
             sendRight = gainIn * sendRight + gainOut * oldRight * oldScale;
+            ahead = gainIn * ahead + gainOut * oldAhead;
+            if (oldRepeats != states[(size_t) current].lockOn)
+                repeats = oldRepeats ? gainOut : gainIn;   // one of each: the share of the one that repeats
 
             if (++transition.position >= transition.length)
                 transition.active = false;
         }
 
         // Hollow and Width shape what is heard. What Feedback sends back is the loop before them.
-        applyShape (ctx, frequency, left, right);
+        const float side = applyShape (ctx, frequency, left, right, repeats, ahead);
 
         const bool wrapped = advance (states[(size_t) current], frequency);
         samplesSinceCapture += 1.0;
@@ -1344,6 +1392,16 @@ namespace grainlock
         {
             outLeft += left * gain;
             outRight += right * gain;
+        }
+
+        // Width goes on after the voice has been placed, so left plus right is what it was wherever
+        // the voice sits. The further to one side, the less of it there is: a voice hard to one side
+        // has nothing on the other side to take it from.
+        if (! juce::exactlyEqual (side, 0.0f))
+        {
+            const float s = side * gain * (offCentre ? juce::jmin (placeLeft, placeRight) : 1.0f);
+            outLeft += s;
+            outRight -= s;
         }
 
         if (ctx.feedbackOn)
