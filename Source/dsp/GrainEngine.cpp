@@ -26,6 +26,7 @@ namespace grainlock
         }
         sustain.reset (sampleRate, 0.02);
         outGain.reset (sampleRate, 0.02);
+        bypassFade.reset (sampleRate, 0.02);
 
         limiter.prepare (sampleRate);
         // Different seeds, so S&H on two LFOs never steps in lockstep.
@@ -87,6 +88,7 @@ namespace grainlock
             }
             sustain.setCurrentAndTargetValue (params.sustainPercent / 100.0f);
             outGain.setCurrentAndTargetValue (gain);
+            bypassFade.setCurrentAndTargetValue (params.bypass ? 1.0f : 0.0f);
             firstBlock = false;
         }
         else
@@ -103,6 +105,7 @@ namespace grainlock
             }
             sustain.setTargetValue (params.sustainPercent / 100.0f);
             outGain.setTargetValue (gain);
+            bypassFade.setTargetValue (params.bypass ? 1.0f : 0.0f);
         }
 
         offsetSamples = juce::jlimit (0, (int) (0.5 * sampleRate), (int) std::lround (params.offsetMs * sampleRate / 1000.0));
@@ -262,6 +265,19 @@ namespace grainlock
             {
                 outL += (limL - outL) * limiterBlend;
                 outR += (limR - outR) * limiterBlend;
+            }
+
+            // Host bypass: fade to the untouched input (everything above keeps running underneath).
+            const float b = bypassFade.getNextValue();
+            if (b >= 1.0f)
+            {
+                outL = inL;
+                outR = inR;
+            }
+            else if (b > 0.0f)
+            {
+                outL += (inL - outL) * b;
+                outR += (inR - outR) * b;
             }
 
             left[i] = outL;

@@ -562,8 +562,8 @@ namespace
 
         GrainLockProcessor a;
         const auto& aParams = a.getParameters();
-        check (aParams.size() == (int) std::size (ParamID::all),
-               fmt ("%d parameters exposed (expected %d)", aParams.size(), (int) std::size (ParamID::all)));
+        check (aParams.size() == (int) std::size (ParamID::all) + 1,
+               fmt ("%d parameters exposed (expected %d plus the bypass switch)", aParams.size(), (int) std::size (ParamID::all)));
 
         for (const char* id : ParamID::all)
             check (a.apvts.getParameter (id) != nullptr, juce::String ("parameter id present: ") + id);
@@ -857,6 +857,61 @@ namespace
         }
 
         check (maxDiff <= 1.0e-6f, fmt ("while bypassed and after (note-off sent during bypass): max |out - in| = %.3g", (double) maxDiff));
+    }
+
+    void testBypassSwitch()
+    {
+        section ("Extra: Cubase's bypass switch fades instead of clicking, and a held note is still there afterwards");
+
+        Harness h (48000.0, 512);
+        h.set (ParamID::captureMode, 0.0f);   // Hold
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        midi.ensureSize (256);
+
+        std::vector<float> in, out;
+        double phase = 0.0;
+        for (int b = 0; b < 200; ++b)
+        {
+            for (int i = 0; i < 512; ++i)
+            {
+                const float v = 0.4f * (float) std::sin (phase);
+                phase += juce::MathConstants<double>::twoPi * 220.0 / 48000.0;
+                buffer.setSample (0, i, v);
+                buffer.setSample (1, i, v);
+                in.push_back (v);
+            }
+            midi.clear();
+            if (b == 20) { const juce::uint8 on[3] = { 0x90, 67, 100 }; midi.addEvent (on, 3, 0); }
+            if (b == 100) h.set (ParamID::bypass, 1.0f);
+            if (b == 150) h.set (ParamID::bypass, 0.0f);
+            h.proc.processBlock (buffer, midi);
+            for (int i = 0; i < 512; ++i)
+                out.push_back (buffer.getSample (0, i));
+        }
+
+        auto maxStep = [] (const std::vector<float>& x, size_t a, size_t b)
+        {
+            float m = 0.0f;
+            for (size_t i = a + 1; i < b; ++i) m = std::max (m, std::abs (x[i] - x[i - 1]));
+            return m;
+        };
+        auto maxDiff = [&] (size_t a, size_t b)
+        {
+            float m = 0.0f;
+            for (size_t i = a; i < b; ++i) m = std::max (m, std::abs (out[i] - in[i]));
+            return m;
+        };
+
+        const size_t on = 100 * 512, off = 150 * 512;
+        const float normal = std::max (maxStep (out, 60 * 512, on), maxStep (in, 0, in.size()));
+        const float goingIn = maxStep (out, on - 1, on + 2400), comingOut = maxStep (out, off - 1, off + 2400);
+        check (goingIn <= 1.25f * normal + 0.005f && comingOut <= 1.25f * normal + 0.005f,
+               fmt ("largest step going into bypass %.4f and coming out %.4f, against %.4f in the steady sound (no click)",
+                    (double) goingIn, (double) comingOut, (double) normal));
+        check (juce::exactlyEqual (maxDiff (on + 2400, off), 0.0f),
+               fmt ("from 50 ms into the bypass the output is the input exactly (max diff %g)", (double) maxDiff (on + 2400, off)));
+        check (maxDiff (off + 4800, out.size()) > 0.05f, "bypass lifted with the key still held: the frozen note is still sounding");
     }
 
     void testLfoSyncedSampleHold()
@@ -1238,6 +1293,7 @@ int main (int argc, char** argv)
         testRatesBlocksAndLayouts();
         testEnvelopeRelease();
         testBypass();
+        testBypassSwitch();
         testLfoSyncedSampleHold();
         testHostGarbage();
         testThreeLfosTogether();

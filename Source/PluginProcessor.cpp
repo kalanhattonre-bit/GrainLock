@@ -79,6 +79,7 @@ EngineParams GrainLockProcessor::readParameters() const noexcept
     p.mixPercent       = value (params.mix, d.mixPercent);
     p.dryWhenIdle      = asBool (params.dryWhenIdle, d.dryWhenIdle);
     p.outGainDb        = value (params.outGain, d.outGainDb);
+    p.bypass           = asBool (params.bypass, false);
     return p;
 }
 

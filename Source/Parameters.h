@@ -44,6 +44,9 @@ namespace grainlock::ParamID
     inline constexpr const char* dryWhenIdle = "dryWhenIdle";
     inline constexpr const char* outGain     = "outGain";
 
+    /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
+    inline constexpr const char* bypass      = "bypass";
+
     inline constexpr const char* all[] = {
         grainCycles, smooth, offset, captureMode, refresh, pitchLock,
         formant, tune, fine, glide, mono, velSens,
@@ -139,5 +142,6 @@ namespace grainlock
         std::atomic<float>* mix;
         std::atomic<float>* dryWhenIdle;
         std::atomic<float>* outGain;
+        std::atomic<float>* bypass;
     };
 }

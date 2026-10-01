@@ -43,6 +43,7 @@ namespace grainlock
         float mixPercent = 100.0f;
         bool dryWhenIdle = true;
         float outGainDb = 0.0f;
+        bool bypass = false;         // the host's bypass switch: fade to the untouched input
     };
 
     /** What the host said about tempo and position for this block. */
@@ -107,7 +108,7 @@ namespace grainlock
 
         // Smoothed continuous controls.
         juce::SmoothedValue<float> tuneSemis, bendSemis, formantSemis, smoothFraction;
-        juce::SmoothedValue<float> mix, sustain;
+        juce::SmoothedValue<float> mix, sustain, bypassFade;
         std::array<juce::SmoothedValue<float>, numLfos> lfoDepth;   // 0 when that LFO is off, so switching fades
         std::array<juce::SmoothedValue<float>, numLfos> lfoRate;
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outGain { 1.0f };

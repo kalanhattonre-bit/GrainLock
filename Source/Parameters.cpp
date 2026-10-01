@@ -143,6 +143,9 @@ namespace grainlock
         layout.add (boolParam (ParamID::dryWhenIdle, "Dry When Idle", true));
         layout.add (floatParam (ParamID::outGain, "Output Gain", Range (-24.0f, 24.0f, 0.1f), 0.0f, formatDb));
 
+        // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
+        layout.add (boolParam (ParamID::bypass, "Bypass", false));
+
         return layout;
     }
 
@@ -179,6 +182,7 @@ namespace grainlock
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);
+        bypass      = get (ParamID::bypass);
     }
 
     void migrateLegacyLfoState (juce::XmlElement& state)

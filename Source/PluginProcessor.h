@@ -19,9 +19,14 @@ public:
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
     using AudioProcessor::processBlock;
 
-    /** Cubase's bypass button lands here: pass audio through and make sure no note is left stuck. */
+    /** For hosts that bypass by not calling processBlock: pass audio through and make sure no note
+        is left stuck. Cubase uses the Bypass parameter below instead, which crossfades. */
     void processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override;
     using AudioProcessor::processBlockBypassed;
+
+    /** Cubase's bypass button: the engine fades to the untouched input over 20 ms and keeps the notes
+        running underneath, so a held chord is still there when the bypass is lifted. */
+    juce::AudioProcessorParameter* getBypassParameter() const override { return apvts.getParameter (grainlock::ParamID::bypass); }
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
