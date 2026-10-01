@@ -87,6 +87,16 @@ namespace grainlock::ParamID
     inline constexpr const char* offsetSync  = "offsetSync";
     inline constexpr const char* refreshSync = "refreshSync";
 
+    // 0.3: what a note will and will not grab, and feedback.
+    inline constexpr const char* snap       = "snap";
+    inline constexpr const char* threshold  = "threshold";
+    inline constexpr const char* maxWait    = "maxWait";
+    inline constexpr const char* skipHiss   = "skipHiss";
+    inline constexpr const char* gate       = "gate";
+    inline constexpr const char* gridGrabs  = "gridGrabs";
+    inline constexpr const char* skipChance = "skipChance";
+    inline constexpr const char* feedback   = "feedback";
+
     /** The host's bypass switch. Kept out of `all`: presets and resets must never touch it. */
     inline constexpr const char* bypass      = "bypass";
 
@@ -105,7 +115,8 @@ namespace grainlock::ParamID
         envAttack, envDecay, envPitch, envFormant, envGrain, tapeStop,
         bendUp, bendDown, vibRate, vibDepth,
         wheelDest, wheelAmt, touchDest, touchAmt, exprDest, exprAmt,
-        grabAt, wait, waitSync, offsetSync, refreshSync
+        grabAt, wait, waitSync, offsetSync, refreshSync,
+        snap, threshold, maxWait, skipHiss, gate, gridGrabs, skipChance, feedback
     };
 
     /** The parameter IDs of one LFO. */
@@ -201,6 +212,9 @@ namespace grainlock
     inline constexpr double maxOffsetSeconds = 1.2;
     inline constexpr double maxWaitSeconds   = 2.0;
 
+    /** Threshold at the bottom of its range is off. */
+    inline constexpr float thresholdOffDb = -80.0f;
+
     /** Length of one LFO cycle in quarter-note beats for a sync index, or 0 for free-running. */
     double lfoSyncBeats (int syncIndex) noexcept;
 
@@ -265,6 +279,7 @@ namespace grainlock
         std::atomic<float> *envAttack, *envDecay, *envPitch, *envFormant, *envGrain, *tapeStop;
         std::atomic<float> *bendUp, *bendDown, *vibRate, *vibDepth;
         std::atomic<float> *grabAt, *wait, *waitSync, *offsetSync, *refreshSync;
+        std::atomic<float> *snap, *threshold, *maxWait, *skipHiss, *gate, *gridGrabs, *skipChance, *feedback;
 
         std::atomic<float>* mix;
         std::atomic<float>* dryWhenIdle;

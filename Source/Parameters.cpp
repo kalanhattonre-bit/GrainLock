@@ -225,6 +225,20 @@ namespace grainlock
         layout.add (choiceParam (ParamID::offsetSync, "Offset Sync", grabSyncChoices(), 0));
         layout.add (choiceParam (ParamID::refreshSync, "Refresh Sync", lfoSyncChoices(), 0));
 
+        // WHAT A NOTE GRABS. Everything here is off by default.
+        layout.add (floatParam (ParamID::snap, "Snap", Range (0.0f, 100.0f, 0.1f), 0.0f,
+                                [] (float v, int) { return v <= 0.0f ? juce::String ("Off") : formatMs (v, 0); },
+                                [] (const juce::String& text) { return text.trim().equalsIgnoreCase ("off") ? 0.0f : parseMs (text); }));
+        layout.add (floatParam (ParamID::threshold, "Threshold", Range (thresholdOffDb, -10.0f, 0.1f), thresholdOffDb,
+                                [] (float v, int) { return v <= thresholdOffDb ? juce::String ("Off") : juce::String (v, 1) + " dB"; },
+                                [] (const juce::String& text) { return text.trim().equalsIgnoreCase ("off") ? thresholdOffDb : text.trim().getFloatValue(); }));
+        layout.add (floatParam (ParamID::maxWait, "Max Wait", skewedRange (0.0f, 2000.0f, 0.1f, 500.0f), 500.0f, formatMs, parseMs));
+        layout.add (boolParam (ParamID::skipHiss, "Skip Hiss", false));
+        layout.add (boolParam (ParamID::gate, "Gate", false));
+        layout.add (boolParam (ParamID::gridGrabs, "Grid Grabs", false));
+        layout.add (floatParam (ParamID::skipChance, "Skip", Range (0.0f, 100.0f, 1.0f), 0.0f, formatPercent));
+        layout.add (floatParam (ParamID::feedback, "Feedback", Range (0.0f, 100.0f, 0.1f), 0.0f, formatPercent));
+
         // Handed to the host as its bypass switch, so bypassing crossfades instead of cutting.
         layout.add (boolParam (ParamID::bypass, "Bypass", false));
 
@@ -281,6 +295,14 @@ namespace grainlock
         waitSync    = get (ParamID::waitSync);
         offsetSync  = get (ParamID::offsetSync);
         refreshSync = get (ParamID::refreshSync);
+        snap        = get (ParamID::snap);
+        threshold   = get (ParamID::threshold);
+        maxWait     = get (ParamID::maxWait);
+        skipHiss    = get (ParamID::skipHiss);
+        gate        = get (ParamID::gate);
+        gridGrabs   = get (ParamID::gridGrabs);
+        skipChance  = get (ParamID::skipChance);
+        feedback    = get (ParamID::feedback);
         mix         = get (ParamID::mix);
         dryWhenIdle = get (ParamID::dryWhenIdle);
         outGain     = get (ParamID::outGain);
